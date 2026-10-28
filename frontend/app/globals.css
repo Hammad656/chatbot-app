@@ -249,6 +249,85 @@ textarea:focus-visible {
   margin-top: auto;
 }
 
+.cv-manager {
+  margin-bottom: 12px;
+  padding: 11px 10px;
+  border: 1px solid #e9e8e1;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.cv-manager-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cv-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d3d1c8;
+}
+
+.cv-status-ready {
+  background: #8ba17d;
+}
+
+.cv-manager-status {
+  margin: 8px 0 9px;
+  color: #77796f;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.cv-manager-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cv-file-input {
+  display: none;
+}
+
+.cv-upload-button,
+.cv-remove-button {
+  min-height: 29px;
+  padding: 0 9px;
+  border: 1px solid #e5e7df;
+  border-radius: 6px;
+  background: #fff;
+  color: #52694b;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.cv-upload-button:hover:not(:disabled),
+.cv-remove-button:hover:not(:disabled) {
+  border-color: #cbd3c4;
+  background: #fcfdfb;
+}
+
+.cv-upload-button:disabled,
+.cv-remove-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.cv-remove-button {
+  color: #95613f;
+}
+
+.cv-manager-hint {
+  margin: 8px 0 0;
+  color: #92938a;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .privacy-card {
   display: flex;
   align-items: flex-start;

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
 type User = {
   id: string;
@@ -24,6 +24,13 @@ type Chat = {
   messages: Message[];
 };
 
+type CVStatus = {
+  uploaded: boolean;
+  filename: string | null;
+  chunk_count: number;
+  cleanup_pending: boolean;
+};
+
 type AuthState = "loading" | "signed-out" | "signed-in";
 
 const API_URL =
@@ -32,27 +39,27 @@ const API_URL =
 const suggestions = [
   {
     icon: "✳",
-    title: "Help me get organized",
-    description: "Turn a busy week into a clear plan",
-    prompt: "Help me organize my week and decide what to prioritize.",
+    title: "Summarize my experience",
+    description: "Get an overview from your CV",
+    prompt: "Summarize my professional experience using only my CV.",
   },
   {
     icon: "↗",
-    title: "Write something great",
-    description: "Draft, edit, or find the right words",
-    prompt: "Help me write a clear, friendly email to reschedule a meeting.",
+    title: "Find my listed skills",
+    description: "See the skills mentioned in your CV",
+    prompt: "Which skills are listed in my CV?",
   },
   {
     icon: "⌘",
-    title: "Make a tricky topic simple",
-    description: "Get an explanation that actually clicks",
-    prompt: "Explain how the internet works in simple terms.",
+    title: "Review my work history",
+    description: "Explore roles and responsibilities",
+    prompt: "What roles and responsibilities are described in my CV?",
   },
   {
     icon: "✦",
-    title: "Explore a new idea",
-    description: "Brainstorm, research, and get inspired",
-    prompt: "Help me brainstorm a few creative ideas for my next project.",
+    title: "Check my education",
+    description: "Review the education in your CV",
+    prompt: "What education or qualifications are listed in my CV?",
   },
 ];
 
@@ -146,6 +153,8 @@ export default function Home() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [chats, setChats] = useState<Chat[]>([]);
+  const [cv, setCV] = useState<CVStatus | null>(null);
+  const [cvBusy, setCVBusy] = useState(false);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [pendingChatIds, setPendingChatIds] = useState<string[]>([]);
@@ -155,6 +164,7 @@ export default function Home() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const cvFileInputRef = useRef<HTMLInputElement>(null);
 
   async function getCsrfToken() {
     const response = await fetch(`${API_URL}/api/auth/csrf`, {
@@ -191,6 +201,16 @@ export default function Home() {
     return savedChats;
   }
 
+  async function loadCV() {
+    const response = await fetch(`${API_URL}/api/cv`, {
+      credentials: "include",
+    });
+    if (!response.ok) throw new Error(await readError(response));
+    const result = (await response.json()) as CVStatus;
+    setCV(result);
+    return result;
+  }
+
   useEffect(() => {
     let active = true;
 
@@ -213,6 +233,7 @@ export default function Home() {
         if (!active) return;
         setUser(signedInUser);
         await loadChats();
+        await loadCV();
         if (active) setAuthState("signed-in");
       } catch (error) {
         console.error("Could not restore the session.", error);
@@ -377,6 +398,7 @@ export default function Home() {
       setPassword("");
       setAuthState("signed-in");
       const savedChats = await loadChats();
+      await loadCV();
       if (savedChats.length === 0) await createChat();
     } catch (error) {
       console.error(`Could not ${authMode}.`, error);
@@ -402,6 +424,7 @@ export default function Home() {
       if (!response.ok) throw new Error(await readError(response));
       setUser(null);
       setChats([]);
+      setCV(null);
       setActiveChatId(null);
       setAuthState("signed-out");
       setCsrfToken(await getCsrfToken());
@@ -425,6 +448,77 @@ export default function Home() {
     } catch (error) {
       console.error("Could not copy the assistant response.", error);
       setNotice("Could not copy that response to your clipboard.");
+    }
+  }
+
+  async function uploadCV(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    const inputElement = event.currentTarget;
+    setCVBusy(true);
+    setNotice("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(`${API_URL}/api/cv`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: formData,
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = (await response.json()) as CVStatus;
+      setCV(result);
+      setNotice(
+        result.cleanup_pending
+          ? "Your CV is indexed, but an older copy could not be deleted. Remove the CV to clear all its indexed data."
+          : `Your CV is indexed for chat: ${result.filename ?? file.name}.`,
+      );
+    } catch (error) {
+      console.error("Could not index the CV.", error);
+      setNotice(
+        error instanceof TypeError
+          ? "Could not connect to the server."
+          : error instanceof Error
+            ? error.message
+            : "Could not index the CV.",
+      );
+    } finally {
+      inputElement.value = "";
+      setCVBusy(false);
+    }
+  }
+
+  async function removeCV() {
+    if (!window.confirm("Remove your CV and its indexed content?")) return;
+    setCVBusy(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API_URL}/api/cv`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: { "X-CSRF-Token": csrfToken },
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setCV({
+        uploaded: false,
+        filename: null,
+        chunk_count: 0,
+        cleanup_pending: false,
+      });
+      setNotice("Your CV and its indexed content were removed.");
+    } catch (error) {
+      console.error("Could not remove the CV.", error);
+      setNotice(
+        error instanceof TypeError
+          ? "Could not connect to the server."
+          : error instanceof Error
+            ? error.message
+            : "Could not remove the CV.",
+      );
+    } finally {
+      setCVBusy(false);
     }
   }
 
@@ -494,6 +588,54 @@ export default function Home() {
         )}
 
         <div className="sidebar-footer">
+          {authState === "signed-in" && (
+            <section className="cv-manager" aria-label="CV knowledge">
+              <div className="cv-manager-heading">
+                <span className="section-label">CV KNOWLEDGE</span>
+                <span className={`cv-status-dot${cv?.uploaded ? " cv-status-ready" : ""}`} />
+              </div>
+              <p className="cv-manager-status">
+                {cv === null
+                  ? "Checking your CV..."
+                  : cv.uploaded
+                    ? `${cv.filename} · ${cv.chunk_count} passages${cv.cleanup_pending ? " · old data cleanup pending" : ""}`
+                    : "Add a CV to ask questions about your experience."}
+              </p>
+              <div className="cv-manager-actions">
+                <input
+                  ref={cvFileInputRef}
+                  className="cv-file-input"
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={(event) => void uploadCV(event)}
+                  disabled={cvBusy}
+                  aria-label="Choose a CV file"
+                />
+                <button
+                  className="cv-upload-button"
+                  type="button"
+                  onClick={() => cvFileInputRef.current?.click()}
+                  disabled={cvBusy || cv === null}
+                >
+                  {cvBusy ? "Working..." : cv?.uploaded ? "Replace CV" : "Upload CV"}
+                </button>
+                {cv?.uploaded && (
+                  <button
+                    className="cv-remove-button"
+                    type="button"
+                    onClick={() => void removeCV()}
+                    disabled={cvBusy}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="cv-manager-hint">
+                PDF or DOCX, up to 8 MB. CV passages go to Pinecone and relevant
+                passages are shared with OpenAI when answering.
+              </p>
+            </section>
+          )}
           <div className="privacy-card">
             <span className="privacy-icon"><Icon name="spark" size={16} /></span>
             <div>
@@ -516,7 +658,7 @@ export default function Home() {
           </button>
           <div className="assistant-label">
             <span className="online-dot" />
-            <span>{authState === "signed-in" ? "General assistant" : "Your thought partner"}</span>
+            <span>{authState === "signed-in" ? "CV-only assistant" : "Your thought partner"}</span>
             <span className="topbar-divider">/</span>
             <span className="topbar-subtitle">Here for whatever&apos;s on your mind</span>
           </div>
@@ -619,8 +761,8 @@ export default function Home() {
                 <div className="welcome-eyebrow"><span /> YOUR THOUGHT PARTNER</div>
                 <h1>A good place to<br /><span>start somewhere.</span></h1>
                 <p className="welcome-copy">
-                  Big question, small task, half-formed idea — bring it all.
-                  We&apos;ll figure out the next step together.
+                  Ask about your experience, skills, roles, or education. Answers
+                  are based only on the CV you upload.
                 </p>
                 <div className="suggestions">
                   {suggestions.map((suggestion) => (
@@ -709,7 +851,7 @@ export default function Home() {
                     void sendMessage();
                   }
                 }}
-                placeholder="Ask anything, or just start thinking out loud..."
+                placeholder="Ask a question about your CV..."
                 aria-label="Message the assistant"
                 maxLength={12000}
                 rows={1}
@@ -718,7 +860,7 @@ export default function Home() {
               <div className="composer-bottom">
                 <span className="composer-hint">
                   <span className="sparkle-tiny">✳</span>
-                  Thoughtful answers, one question at a time
+                  Answers grounded only in your CV
                 </span>
                 <div className="composer-actions">
                   <span className="keyboard-hint">↵ <span>to send</span></span>
