@@ -19,10 +19,15 @@ through the FastAPI backend and are available across browsers after login.
 3. Open [http://localhost:3000](http://localhost:3000), create an account, and
    start a conversation.
 
+   After signing in, use **Upload CV** in the sidebar to index a PDF or DOCX for
+   CV-aware chat. Pinecone stores the extracted passages; only relevant passages
+   are sent to Gemini with a question. Use **Remove** to delete the indexed CV data.
+
 The browser calls the backend at `NEXT_PUBLIC_API_URL` (default:
-`http://localhost:8000`). The OpenAI key, PostgreSQL password, and session
-signing secret belong in `backend/.env` only. Authentication uses secure,
-HTTP-only session cookies; chat history is not stored in browser local storage.
+`http://localhost:8000`). The Gemini and Pinecone keys, PostgreSQL password,
+and session signing secret belong in `backend/.env` only. Authentication uses
+secure, HTTP-only session cookies; chat history is not stored in browser local
+storage.
 
 ## Other commands
 
