@@ -632,7 +632,7 @@ export default function Home() {
               </div>
               <p className="cv-manager-hint">
                 PDF or DOCX, up to 8 MB. CV passages go to Pinecone and relevant
-                passages are shared with OpenAI when answering.
+                passages are shared with Gemini when answering.
               </p>
             </section>
           )}

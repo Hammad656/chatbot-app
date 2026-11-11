@@ -2,7 +2,7 @@
 
 FastAPI service for Morrow. PostgreSQL stores user accounts, conversations, and
 messages. Passwords are Argon2-hashed; authenticated sessions use HTTP-only
-cookies with CSRF protection. OpenAI requests run on the server, so the API key
+cookies with CSRF protection. Gemini requests run on the server, so the API key
 is never exposed to the browser.
 
 The `database/` directory contains SQLAlchemy models and Alembic migrations.
@@ -24,12 +24,16 @@ Copy-Item backend\.env.example backend\.env
 
 In `backend/.env`, set:
 
-- `OPENAI_API_KEY` to your OpenAI key.
+- `GEMINI_API_KEY` to your Google Gemini API key.
+- Optionally set `GEMINI_MODEL` (defaults to `gemini-3.8-flash`) and
+  `GEMINI_TIMEOUT_SECONDS` (defaults to `45`).
+  If Gemini returns a temporary 503 for the configured model, the backend
+  retries the request once with `gemini-3.6-flash`.
 - `PINECONE_API_KEY` to a Pinecone API key.
 - `PINECONE_INDEX_NAME` to the name of your Pinecone index (for example,
   `blooming-peach`). The index must have an integrated embedding field named
   `text`; the current Pinecone setup uses that field to embed CV passages and
-  search questions. The backend does not generate separate OpenAI embeddings.
+  search questions. The backend does not generate separate embeddings.
   Replace the example API key with your real key; the literal `your-key` is only
   a placeholder and cannot authenticate.
 - `POSTGRES_PASSWORD` to the password for the PostgreSQL user in `POSTGRES_USER`.
@@ -66,8 +70,10 @@ After signing in, use **Upload CV** in the sidebar to upload a PDF or DOCX file
 (maximum 8 MB). The backend extracts selectable text, splits it into overlapping
 passages, and upserts those passages into the configured Pinecone index. Each
 account gets its own Pinecone namespace, and every search is additionally
-filtered to the account's current CV. Replacing a CV updates that reference;
-**Remove** deletes all indexed passages in that user's namespace.
+filtered to the account's current CV. To correct a mistaken upload, select
+**Replace CV** and upload the right PDF or DOCX; the new CV becomes active after
+it is indexed, and the previous CV is then removed. **Remove** deletes all
+indexed passages in that user's namespace.
 
 Chat is CV-only: without an uploaded CV, the assistant asks the user to upload
 one. With a CV, every question searches only the current document in that user's
@@ -80,8 +86,8 @@ excerpt labels. General questions unrelated to the CV are out of scope. Scanned
 PDFs require OCR before upload; OCR is not included.
 
 The original file is not retained. Extracted passages are stored by Pinecone,
-and relevant passages are sent to OpenAI during CV-aware chat. Keep both API
-keys private in `backend/.env`; never put them in the frontend.
+and relevant passages are sent to Gemini during CV-aware chat. Keep the Gemini
+and Pinecone API keys private in `backend/.env`; never put them in the frontend.
 
 ## Run
 

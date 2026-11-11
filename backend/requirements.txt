@@ -1,5 +1,5 @@
 fastapi>=0.115,<1.0
-openai>=1.68,<3.0
+google-genai>=1.0,<2.0
 pinecone>=10,<11
 python-docx>=1.1,<2.0
 python-multipart>=0.0.20,<1.0

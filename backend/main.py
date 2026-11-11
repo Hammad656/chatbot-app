@@ -18,7 +18,8 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI, OpenAIError
+from google import genai
+from google.genai import errors, types
 from pinecone.exceptions import PineconeException
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from pwdlib import PasswordHash
@@ -44,7 +45,8 @@ from rag import (
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-3.6-flash"
 SESSION_COOKIE = "morrow_session"
 CSRF_COOKIE = "morrow_csrf"
 SESSION_MAX_AGE = 60 * 60 * 24 * 7
@@ -147,6 +149,52 @@ def configured_origins() -> list[str]:
         "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
     )
     return [origin.strip() for origin in origins.split(",") if origin.strip()]
+
+
+def _gemini_contents(
+    recent_history: list[dict[str, str]], current_question: str
+) -> list[types.Content]:
+    contents = [
+        types.Content(
+            role="model" if message["role"] == "assistant" else "user",
+            parts=[types.Part.from_text(text=message["content"])],
+        )
+        for message in recent_history
+    ]
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=current_question)],
+        )
+    )
+    return contents
+
+
+async def _generate_gemini_content(
+    client: genai.Client,
+    model: str,
+    contents: list[types.Content],
+    config: types.GenerateContentConfig,
+) -> types.GenerateContentResponse:
+    try:
+        return await client.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+    except errors.APIError as error:
+        if error.code != 503 or model == FALLBACK_MODEL:
+            raise
+        logger.warning(
+            "Gemini model %s is unavailable; retrying with fallback model %s.",
+            model,
+            FALLBACK_MODEL,
+        )
+        return await client.aio.models.generate_content(
+            model=FALLBACK_MODEL,
+            contents=contents,
+            config=config,
+        )
 
 
 def session_secret() -> str:
@@ -268,7 +316,7 @@ async def health_check():
     postgres_password = os.getenv("POSTGRES_PASSWORD")
     return {
         "status": "ok",
-        "ai_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "ai_configured": bool(os.getenv("GEMINI_API_KEY")),
         "database_configured": bool(
             postgres_password
             and postgres_password != "replace-with-your-postgres-password"
@@ -614,11 +662,11 @@ async def chat(
             detail="Conversation ID in the URL and request body must match.",
         )
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The assistant is not configured yet. Add OPENAI_API_KEY to backend/.env.",
+            detail="The assistant is not configured yet. Add GEMINI_API_KEY to backend/.env.",
         )
 
     conversation = await db.scalar(
@@ -697,39 +745,44 @@ async def chat(
                 f"[CV: {chunk.section}, excerpt {chunk.chunk_index + 1}]\n{chunk.text}"
                 for chunk in retrieved_chunks
             )
-            client = AsyncOpenAI(
+            client = genai.Client(
                 api_key=api_key,
-                timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "45")),
-                max_retries=1,
+                http_options=types.HttpOptions(
+                    timeout=int(float(os.getenv("GEMINI_TIMEOUT_SECONDS", "45")) * 1000)
+                ),
             )
             try:
-                response = await client.responses.create(
-                    model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
-                    instructions=CV_ONLY_INSTRUCTIONS,
-                    input=[
-                        {
-                            "role": "developer",
-                            "content": (
-                                "The following excerpts are the only source of facts about "
-                                f"the user:\n\n{context}"
-                            ),
-                        },
-                        *recent_history,
-                        {"role": "user", "content": request.content.strip()},
-                    ],
+                response = await _generate_gemini_content(
+                    client=client,
+                    model=os.getenv("GEMINI_MODEL", DEFAULT_MODEL),
+                    contents=_gemini_contents(
+                        recent_history, request.content.strip()
+                    ),
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            f"{CV_ONLY_INSTRUCTIONS}\n\n"
+                            "The following excerpts are the only source of facts about "
+                            f"the user:\n\n{context}"
+                        )
+                    ),
                 )
-            except OpenAIError as error:
-                logger.exception("OpenAI request failed.")
+            except errors.APIError as error:
+                logger.exception("Gemini request failed.")
+                if error.code == 503:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Gemini is temporarily unavailable. Please try again shortly.",
+                    ) from error
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="The AI service could not complete your request. Please try again.",
                 ) from error
             finally:
-                await client.close()
+                await client.aio.aclose()
 
-            answer = response.output_text.strip()
+            answer = (response.text or "").strip()
             if not answer:
-                logger.error("OpenAI returned an empty response.")
+                logger.error("Gemini returned an empty response.")
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="The AI service returned an empty response. Please try again.",
