@@ -1,2 +1,6 @@
 # Linux container entrypoints must stay executable by /bin/sh after Windows checkout.
 *.sh text eol=lf
+
+# Preserve generated document bytes when checking out on Windows.
+*.pdf binary
+*.docx binary

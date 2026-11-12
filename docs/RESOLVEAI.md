@@ -65,6 +65,11 @@ Useful second exercises:
 5. Create another account and add it as an agent. It can prepare drafts but not approve.
 6. Create a second workspace and verify that its documents/inbox are separate.
 
+For a larger uploadable corpus, use the [Northstar Workspace demo knowledge pack](demo/README.md).
+It includes a fictional company knowledge base in PDF, DOCX and Markdown, plus
+a separate guide with 60 questions and workflow exercises. Upload one knowledge
+file; keep the expected-answer guide outside the workspace knowledge base.
+
 Linux/macOS commands use `.venv/bin/python` instead of the Windows interpreter
 path. Install dependencies and run Alembic from `backend`, where `alembic.ini`
 and the Python modules live.
