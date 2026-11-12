@@ -25,10 +25,14 @@ Copy-Item backend\.env.example backend\.env
 In `backend/.env`, set:
 
 - `GEMINI_API_KEY` to your Google Gemini API key.
-- Optionally set `GEMINI_MODEL` (defaults to `gemini-3.8-flash`) and
+- Optionally set `GEMINI_MODEL` (defaults to `gemini-flash-latest`) and
   `GEMINI_TIMEOUT_SECONDS` (defaults to `45`).
-  If Gemini returns a temporary 503 for the configured model, the backend
-  retries the request once with `gemini-3.6-flash`.
+  If Google rejects that model with 404, or returns a temporary 503, the backend
+  lists models using the same API key and retries generation at most once with
+  a different advertised stable Flash text model supporting `generateContent`.
+  It prefers the Flash alias for 404 and the Flash Lite alias for 503; it never
+  silently switches to Pro, preview, image, audio, or embedding models.
+  An existing `GEMINI_MODEL` in your private `.env` overrides the code default.
 - `PINECONE_API_KEY` to a Pinecone API key.
 - `PINECONE_INDEX_NAME` to the name of your Pinecone index (for example,
   `blooming-peach`). The index must have an integrated embedding field named
@@ -63,6 +67,46 @@ The migrations create users, conversations, messages, revocable login sessions,
 and CV indexing metadata. Deleting a user deletes their database records. Login
 sessions expire after seven days. Run `alembic upgrade head` again whenever the
 database schema changes.
+
+## Diagnose Gemini configuration
+
+A `404 NOT_FOUND` mentioning `models/gemini-1.5-flash` means that the model
+selected by the running process is unavailable or does not support
+`generateContent`. Changing only the API key does not change `GEMINI_MODEL`.
+Replace that stale setting with a model available to your Google AI Studio
+project. The default alias in `.env.example` follows the official Python SDK's
+Flash examples; availability still depends on the project and current service.
+
+From the backend directory, using the same virtual environment as Uvicorn:
+
+```powershell
+.\.venv\Scripts\python.exe check_gemini.py
+```
+
+This lists generation model names without printing the API key. Copy a suitable
+Flash text model name into `GEMINI_MODEL` in your existing private `.env`.
+To also make a small generation request (uses Gemini quota):
+
+```powershell
+.\.venv\Scripts\python.exe check_gemini.py --test
+```
+
+Stop and restart Uvicorn after changing `.env`; editing `.env` does not reliably
+restart a running backend. Existing exported environment variables take
+precedence over `.env`. If the model shown by the diagnostic or `/health` still
+looks wrong, check for an exported `GEMINI_MODEL` override or a backend process
+running from another checkout. The health check shows the configured model,
+but does not prove provider connectivity or quota availability.
+
+The chat API reports model/configuration failures as 503, Google quota/rate
+limits as 429, and other provider failures as 502. It does not retry quota or
+API-key errors across other models. Diagnostic output and public error messages
+do not include credential values or raw provider response bodies.
+
+A hydration warning involving `cz-shortcut-listen` on `<body>` is separate from
+a provider error. Browser extensions can inject that attribute before React
+hydrates. Test in a browser profile with extensions disabled; do not hide all
+hydration warnings to work around it.
 
 ## CV retrieval-augmented chat
 

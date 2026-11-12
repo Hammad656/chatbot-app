@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -45,8 +46,8 @@ from rag import (
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-3.8-flash"
-FALLBACK_MODEL = "gemini-3.6-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
+FALLBACK_MODEL = "gemini-flash-lite-latest"
 SESSION_COOKIE = "morrow_session"
 CSRF_COOKIE = "morrow_csrf"
 SESSION_MAX_AGE = 60 * 60 * 24 * 7
@@ -170,12 +171,93 @@ def _gemini_contents(
     return contents
 
 
+def configured_gemini_model() -> str:
+    return (
+        (os.getenv("GEMINI_MODEL") or "").strip().removeprefix("models/")
+        or DEFAULT_MODEL
+    )
+
+
+async def _gemini_fallback_model(
+    client: genai.Client, requested_model: str, status_code: int
+) -> str | None:
+    # Only retry a model Google actually advertises for generateContent. Avoid
+    # silently selecting Pro, preview, image, audio, or embedding models.
+    available = set()
+    models = await client.aio.models.list(config=types.ListModelsConfig(page_size=100))
+    async for model in models:
+        name = (model.name or "").removeprefix("models/")
+        if (
+            name != requested_model
+            and "generateContent" in (model.supported_actions or [])
+            and re.fullmatch(
+                r"gemini-(?:\d+(?:\.\d+)*-)?flash(?:-lite)?(?:-\d{3})?(?:-latest)?",
+                name,
+            )
+        ):
+            available.add(name)
+
+    preferred = (
+        (FALLBACK_MODEL, DEFAULT_MODEL)
+        if status_code == 503
+        else (DEFAULT_MODEL, FALLBACK_MODEL)
+    )
+    for name in (*preferred, *sorted(available, reverse=True)):
+        if name in available:
+            return name
+    return None
+
+
+def _gemini_http_error(error: errors.APIError) -> HTTPException:
+    if error.code == 404:
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The configured Gemini model is unavailable for this API key. "
+                "Run python check_gemini.py from backend, set GEMINI_MODEL to a "
+                "listed generateContent model in backend/.env, and restart the backend."
+            ),
+        )
+    if error.code == 429:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Gemini rate limit or quota exceeded. Check your Google AI Studio "
+                "project's quota and billing, then retry when capacity is available."
+            ),
+        )
+    if error.code in (401, 403) or (
+        error.code == 400
+        and (
+            "api key" in (error.message or "").lower()
+            or "API_KEY_INVALID" in str(error.details)
+        )
+    ):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Gemini rejected the API key or project permissions. Check "
+                "GEMINI_API_KEY and your Google AI Studio project restrictions."
+            ),
+        )
+    if error.code == 503:
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini is temporarily unavailable. Please try again shortly.",
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Gemini could not complete the request. Check the provider status in the backend log.",
+    )
+
+
 async def _generate_gemini_content(
     client: genai.Client,
     model: str,
     contents: list[types.Content],
     config: types.GenerateContentConfig,
 ) -> types.GenerateContentResponse:
+    model = model.strip().removeprefix("models/") or DEFAULT_MODEL
     try:
         return await client.aio.models.generate_content(
             model=model,
@@ -183,15 +265,19 @@ async def _generate_gemini_content(
             config=config,
         )
     except errors.APIError as error:
-        if error.code != 503 or model == FALLBACK_MODEL:
+        if error.code not in (404, 503):
+            raise
+        fallback = await _gemini_fallback_model(client, model, error.code)
+        if fallback is None:
             raise
         logger.warning(
-            "Gemini model %s is unavailable; retrying with fallback model %s.",
+            "Gemini model %s failed with HTTP %s; retrying once with listed model %s.",
             model,
-            FALLBACK_MODEL,
+            error.code,
+            fallback,
         )
         return await client.aio.models.generate_content(
-            model=FALLBACK_MODEL,
+            model=fallback,
             contents=contents,
             config=config,
         )
@@ -317,6 +403,7 @@ async def health_check():
     return {
         "status": "ok",
         "ai_configured": bool(os.getenv("GEMINI_API_KEY")),
+        "gemini_model": configured_gemini_model(),
         "database_configured": bool(
             postgres_password
             and postgres_password != "replace-with-your-postgres-password"
@@ -754,7 +841,7 @@ async def chat(
             try:
                 response = await _generate_gemini_content(
                     client=client,
-                    model=os.getenv("GEMINI_MODEL", DEFAULT_MODEL),
+                    model=configured_gemini_model(),
                     contents=_gemini_contents(
                         recent_history, request.content.strip()
                     ),
@@ -767,16 +854,12 @@ async def chat(
                     ),
                 )
             except errors.APIError as error:
-                logger.exception("Gemini request failed.")
-                if error.code == 503:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Gemini is temporarily unavailable. Please try again shortly.",
-                    ) from error
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="The AI service could not complete your request. Please try again.",
-                ) from error
+                logger.error(
+                    "Gemini request failed (provider HTTP %s, configured model %s).",
+                    error.code,
+                    configured_gemini_model(),
+                )
+                raise _gemini_http_error(error) from error
             finally:
                 await client.aio.aclose()
 
