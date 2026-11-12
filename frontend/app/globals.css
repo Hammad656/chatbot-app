@@ -1697,3 +1697,27 @@ textarea:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+.support-launch-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  margin-right: 12px;
+  padding: 0 10px;
+  border: 1px solid #c6a2e744;
+  border-radius: 9px;
+  background: #bf98e915;
+  color: #dfc3f5;
+  font-size: 11px;
+  text-decoration: none;
+}
+.support-launch-link:hover {
+  background: #bf98e92a;
+}
+@media (max-width: 450px) {
+  .support-launch-link {
+    margin-right: 7px;
+    padding: 0 7px;
+    font-size: 9px;
+  }
+}

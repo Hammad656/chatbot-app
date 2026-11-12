@@ -1,8 +1,9 @@
+import asyncio
 import logging
 import os
 import re
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -19,6 +20,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import errors, types
 from pinecone.exceptions import PineconeException
@@ -32,6 +34,8 @@ from starlette.concurrency import run_in_threadpool
 
 from database.models import AuthSession, ChatMessage, Conversation, User, UserCV
 from database.session import engine, get_db
+from resolveai.router import build_router
+
 from rag import (
     MAX_UPLOAD_BYTES,
     delete_cv,
@@ -383,8 +387,19 @@ def require_database_password() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
-    await engine.dispose()
+    from resolveai.worker import run_worker
+
+    worker = None
+    if os.getenv("RESOLVEAI_INLINE_WORKER", "true").lower() == "true":
+        worker = asyncio.create_task(run_worker())
+    try:
+        yield
+    finally:
+        if worker:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+        await engine.dispose()
 
 
 app = FastAPI(title="Morrow Chat API", version="2.0.0", lifespan=lifespan)
@@ -395,6 +410,12 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-CSRF-Token"],
 )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_unavailable(_: Request, error: SQLAlchemyError):
+    logger.error("Database request failed (%s). Check connectivity and migrations.", type(error).__name__)
+    return JSONResponse(status_code=503, content={"detail": "Database unavailable or schema not ready. Check PostgreSQL and run alembic upgrade head from backend."})
 
 
 @app.get("/health")
@@ -891,3 +912,10 @@ async def chat(
         answer=answer,
         message=assistant_message,
     )
+
+
+# Reuse the existing session/CSRF boundary without circular router imports.
+app.include_router(build_router(
+    get_current_user, require_csrf, _generate_gemini_content,
+    configured_gemini_model, _gemini_http_error,
+))

@@ -10,7 +10,7 @@ PostgreSQL itself stores database files in its own server-managed data directory
 
 ## Requirements
 
-- Python 3.10 or later
+- Python 3.11 or later (tested with Python 3.12)
 - PostgreSQL with the `chatbot-db` database created
 
 ## Configure
@@ -144,3 +144,7 @@ available at `http://localhost:8000/docs`. `GET /health` reports whether AI,
 database, and CV RAG settings are present. Account endpoints are under `/api/auth`, chats
 are under `/api/chats`, and `POST /api/chat/{conversation_id}` saves a message
 and its AI response to that user's conversation.
+
+## ResolveAI support workspace
+
+The support web MVP is available at `/resolve`. Read the [implementation and learning guide](../docs/RESOLVEAI.md) for setup, document workers, tenant roles, LangGraph/tools, approval guarantees, testing and Docker. Run `alembic upgrade head` after installing the updated requirements. Existing CV endpoints remain available.

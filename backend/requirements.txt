@@ -12,3 +12,6 @@ alembic>=1.14,<2.0
 pwdlib[argon2]>=0.2,<1.0
 PyJWT>=2.10,<3.0
 email-validator>=2.2,<3.0
+langchain-core>=1.8,<2.0
+langgraph>=1.2,<2.0
+httpx>=0.28,<1.0

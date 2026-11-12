@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import LiquidOrb from "./liquid-orb";
+import Link from "next/link";
 
 type User = {
   id: string;
@@ -844,6 +845,9 @@ export default function Home() {
           </div>
           {authState === "signed-in" && user && (
             <div className="account-controls">
+              <Link className="support-launch-link" href="/resolve">
+                ResolveAI support <Icon name="arrow" size={13} />
+              </Link>
               <button
                 className="sign-out-button"
                 onClick={() => void signOut()}

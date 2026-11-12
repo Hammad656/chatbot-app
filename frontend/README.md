@@ -35,3 +35,7 @@ storage.
 npm run lint
 npm run build
 ```
+
+## ResolveAI
+
+Open `/resolve` for the support dashboard. It uses the existing login and backend URL. Create a Local demo workspace and load demo data to try the workflow without provider keys. See [the learning guide](../docs/RESOLVEAI.md) for the architecture and startup steps.
