@@ -278,7 +278,25 @@ Next development server before building into the same `.next` directory.
 Docker, from the root:
 
 ```powershell
-docker compose --env-file backend/.env up --build
+docker compose --env-file backend/.env up --build -d
+docker compose --env-file backend/.env ps -a
+docker compose --env-file backend/.env logs --tail 80 api
+```
+
+Pass `--env-file backend/.env` to every Compose command, including `ps`, `logs`
+and `down`. The service-level `env_file` populates the API container; it does
+not supply `${POSTGRES_PASSWORD}` when Compose reads `compose.yaml`. Omitting
+the flag can report a missing password even when `backend/.env` is configured.
+
+On Windows, Git can convert shell scripts to CRLF line endings. Linux `/bin/sh`
+then rejects the startup script's `set -eu` line and exits with code 2. The
+repository keeps shell scripts in LF and the backend image normalizes the
+entrypoint during its build, including older Windows checkouts. If the API
+exits during startup, inspect its logs using the command above; the frontend
+waits for the API to become healthy. After pulling a startup fix, rebuild:
+
+```powershell
+docker compose --env-file backend/.env up --build -d
 ```
 
 Compose uses a separate PostgreSQL volume with an initially empty database; it

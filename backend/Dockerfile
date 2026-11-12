@@ -4,6 +4,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt && useradd --create-home appuser
 COPY --chown=appuser:appuser . .
+# Existing Windows checkouts can still contain CRLF before .gitattributes is applied.
+RUN sed -i 's/\r$//' scripts/start.sh
 USER appuser
 EXPOSE 8000
 CMD ["sh", "scripts/start.sh"]
