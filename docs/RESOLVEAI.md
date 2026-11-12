@@ -113,6 +113,16 @@ existing integrated `text` embedding field. Run `python check_gemini.py --test`
 to check your own key/model/quota. Provider failures remain visible; the service
 does not silently switch a Gemini workspace to local demo behavior.
 
+For the support JSON-answer path, also run
+`docker compose --env-file backend/.env exec api python check_gemini.py --structured`
+from the repository root (or `python check_gemini.py --structured` from backend
+when running without Docker). This uses synthetic data and one generation
+request. A ready document confirms ingestion, not Gemini answer generation.
+ResolveAI strips the unsupported `additionalProperties` schema keyword before
+calling Gemini, while keeping `extra="forbid"` and all other Pydantic validation
+on returned answers. Rebuild the API image after pulling this fix; existing
+documents and vectors can stay in place.
+
 The PDF suggested pgvector as one stack option. This implementation keeps your
 existing Pinecone integration for hosted embeddings rather than introducing a
 second vector platform and a PostgreSQL extension requirement.

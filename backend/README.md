@@ -91,6 +91,31 @@ To also make a small generation request (uses Gemini quota):
 .\.venv\Scripts\python.exe check_gemini.py --test
 ```
 
+For ResolveAI, test the JSON response schema too. A successful plain-text
+generation does not prove structured outputs work:
+
+```powershell
+.\.venv\Scripts\python.exe check_gemini.py --structured
+```
+
+In Docker, run the check against the API container's actual settings:
+
+```powershell
+docker compose --env-file backend/.env exec api python check_gemini.py --structured
+```
+
+The structured check uses synthetic data and makes one generation request;
+it does not upload a CV, company document or customer record. Provider errors
+include a redacted diagnostic in server logs and CLI output. Public API errors
+identify HTTP 400 request rejection without exposing the raw provider message.
+
+An error saying `Unknown name "additional_properties"` at
+`generation_config.response_schema` comes from Pydantic's strict schema being
+sent through the SDK to an API that does not accept that field. ResolveAI
+removes that keyword from the provider schema while retaining strict Pydantic
+validation on generated answers. Pull the fix and rebuild the API image; the
+existing document and Pinecone passages do not need re-uploading.
+
 Stop and restart Uvicorn after changing `.env`; editing `.env` does not reliably
 restart a running backend. Existing exported environment variables take
 precedence over `.env`. If the model shown by the diagnostic or `/health` still

@@ -72,3 +72,30 @@ class OrderCreate(StrictModel):
     currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     refundable: bool = False
     replaceable: bool = False
+
+
+def gemini_response_schema(model: type[BaseModel]) -> dict:
+    """Keep local validation strict without sending unsupported Gemini keywords.
+
+    Pydantic's extra='forbid' emits additionalProperties=False. The SDK turns
+    that into additional_properties in response_schema, which the Gemini
+    Developer API rejects. Strip that keyword only from provider schemas,
+    including nested definitions; model_validate_json still enforces it here.
+    """
+    schema = model.model_json_schema()
+
+    def clean(node):
+        if not isinstance(node, dict):
+            return
+        node.pop("additionalProperties", None)
+        node.pop("additional_properties", None)
+        for group in ("properties", "$defs", "definitions"):
+            for child in node.get(group, {}).values():
+                clean(child)
+        clean(node.get("items"))
+        for group in ("anyOf", "oneOf", "allOf", "prefixItems"):
+            for child in node.get(group, []):
+                clean(child)
+
+    clean(schema)
+    return schema

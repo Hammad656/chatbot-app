@@ -6,7 +6,6 @@ import re
 from typing import TypedDict
 
 import httpx
-from database.models import DemoOrder
 from fastapi import HTTPException
 from google import genai
 from google.genai import errors, types
@@ -15,8 +14,9 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from database.models import DemoOrder
 from resolveai.knowledge import retrieve, terms
-from resolveai.schemas import Draft, OrderLookup, Triage
+from resolveai.schemas import Draft, OrderLookup, Triage, gemini_response_schema
 
 PROMPT_VERSION = "support-v1"
 QUEUES = {
@@ -132,7 +132,7 @@ class SupportEngine:
                 types.GenerateContentConfig(
                     system_instruction=instruction,
                     response_mime_type="application/json",
-                    response_schema=schema,
+                    response_schema=gemini_response_schema(schema),
                     max_output_tokens=2500,
                 ),
             )

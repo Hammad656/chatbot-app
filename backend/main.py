@@ -212,7 +212,24 @@ async def _gemini_fallback_model(
     return None
 
 
+def gemini_error_message(error: errors.APIError) -> str:
+    """Bounded provider diagnostic for server logs/CLI, without API keys."""
+    message = error.message or "No provider explanation was supplied."
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        key = os.getenv(name)
+        if key:
+            message = message.replace(key, "[redacted]")
+    message = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[redacted]", message)
+    return " ".join(message.split())[:1500]
+
+
 def _gemini_http_error(error: errors.APIError) -> HTTPException:
+    logger.error(
+        "Gemini generation failed (provider_http=%s, model=%s): %s",
+        error.code,
+        configured_gemini_model(),
+        gemini_error_message(error),
+    )
     if error.code == 404:
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -249,9 +266,21 @@ def _gemini_http_error(error: errors.APIError) -> HTTPException:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Gemini is temporarily unavailable. Please try again shortly.",
         )
+    if error.code == 400:
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Gemini rejected the generation request (HTTP 400). Check the configured "
+                "model and structured-output settings. Run python check_gemini.py --structured "
+                "inside the backend for the provider's diagnostic."
+            ),
+        )
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
-        detail="Gemini could not complete the request. Check the provider status in the backend log.",
+        detail=(
+            f"Gemini could not complete the request (provider HTTP {error.code}). "
+            "Check the provider diagnostic in the backend log."
+        ),
     )
 
 
@@ -875,11 +904,6 @@ async def chat(
                     ),
                 )
             except errors.APIError as error:
-                logger.error(
-                    "Gemini request failed (provider HTTP %s, configured model %s).",
-                    error.code,
-                    configured_gemini_model(),
-                )
                 raise _gemini_http_error(error) from error
             finally:
                 await client.aio.aclose()

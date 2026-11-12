@@ -185,6 +185,30 @@ class GeminiErrorTests(unittest.TestCase):
         self.assertEqual(result.status_code, 503)
         self.assertIn("GEMINI_API_KEY", result.detail)
 
+    def test_invalid_request_has_safe_public_detail_and_redacted_provider_log(self):
+        key = "AIza" + "a" * 35
+        error = errors.ClientError(
+            400,
+            {"error": {"message": (
+                "Invalid JSON payload: unknown schema property.\nrequest_key: " + key
+            )}},
+        )
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": key}),
+            self.assertLogs("main", level="ERROR") as logs,
+        ):
+            result = _gemini_http_error(error)
+        output = " ".join(logs.output)
+        self.assertEqual(result.status_code, 502)
+        self.assertIn("HTTP 400", result.detail)
+        self.assertIn("--structured", result.detail)
+        self.assertIn("unknown schema property", output)
+        self.assertIn("provider_http=400", output)
+        self.assertIn("[redacted]", output)
+        self.assertNotIn(key, output)
+        self.assertNotIn("unknown schema property", result.detail)
+        self.assertNotIn(key, result.detail)
+
 
 class GeminiChatFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_exposes_specific_provider_error_and_closes_client(self):

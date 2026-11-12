@@ -8,6 +8,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from database.models import (
     BusinessDocument,
     DemoOrder,
@@ -23,13 +29,7 @@ from database.models import (
     WorkspaceMember,
 )
 from database.session import get_db
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from rag import MAX_UPLOAD_BYTES, pinecone_is_configured, safe_filename
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from resolveai.knowledge import retrieve
 from resolveai.schemas import (
     Feedback,
@@ -932,8 +932,14 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         except Exception as error:
             run.status, run.error = (
                 "failed",
-                "Knowledge request failed. Check provider configuration and retry.",
+                (
+                    str(error.detail)[:500]
+                    if isinstance(error, HTTPException)
+                    else "Knowledge request failed. Check provider configuration and retry."
+                ),
             )
+            run.model, run.tokens = service.model, service.tokens
+            run.duration_ms = round((time.monotonic() - started) * 1000)
             run.completed_at = datetime.now(timezone.utc)
             await db.commit()
             if isinstance(error, HTTPException):
