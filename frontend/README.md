@@ -1,7 +1,8 @@
 # ResolveAI frontend
 
-The Next.js app serves the company dashboard at `/`. `/resolve` redirects home;
-there is no personal CV application. Sign in, choose a workspace, upload a
+The Next.js app serves one company application. `/` and `/resolve` redirect to
+`/knowledge`; logged-out visitors are sent to `/login`.
+There is no personal CV application. Sign in, choose a workspace, upload a
 company document in **Knowledge base**, and start or resume a cited conversation.
 
 The typed API helper sends relative `/api/v1/...` requests. Next.js rewrites
@@ -26,3 +27,35 @@ workspaces clears the active conversation; stale network responses are ignored.
 
 The UI retains the dark glass theme, responsive layout, motion preferences,
 sources, mock orders, reviewer controls, audit history and team membership.
+
+## Auth and navigation
+
+Dedicated pages: `/login`, `/signup`, `/onboarding`, `/dashboard`, `/knowledge`,
+`/tickets`, `/mock-orders`, `/activity`, `/settings`, `/settings/members`, `/invite`.
+All use the same origin and API; these are pages in one app, not separate servers.
+
+`auth-form.tsx` provides visible sign-in/signup links, actionable errors, password
+visibility, and a POST fallback that keeps credentials out of URLs.
+`resolve/api.ts` stores the access token only in memory, serializes cookie-changing
+auth operations across tabs, and retries an expired-token request once. A change
+of account/workspace during refresh clears the old view instead of replaying a
+mutation against another company. Logout notifies the other tabs.
+
+`resolve/workspace-panels.tsx` implements invitations, role changes, membership
+removal, settings and owner-only workspace deletion. Invitation secrets use a
+URL fragment and a short-lived pending-invitation sessionStorage entry; access
+and refresh credentials never use localStorage/sessionStorage.
+
+## Browser regression checks
+
+With a running development stack at `http://127.0.0.1:3000`:
+
+```powershell
+npm ci
+npx playwright install chromium
+npm run test:e2e
+```
+
+Set `E2E_BASE_URL` to use another development origin. Tests create synthetic
+accounts/workspaces and use the actual document worker in Local demo mode.
+They do not call a model provider. CI creates its own disposable Compose stack.

@@ -26,7 +26,7 @@ from resolveai.workflow import QUEUES, SupportEngine
 
 async def process_ticket_once(factory=async_session_factory, *, workspace_id, run_id):
     async with factory() as db:
-        await set_tenant(db, workspace_id)
+        await set_tenant(db, workspace_id, for_write=True)
         run = await db.scalar(
             select(SupportRun)
             .where(SupportRun.id == run_id, SupportRun.workspace_id == workspace_id)
@@ -78,6 +78,7 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
             return False
         workspace = await db.get(Workspace, workspace_id)
         mode = workspace.ai_mode
+        settings = workspace.settings
         context["tries"] = int(context.get("tries", 0)) + 1
         context["started_at"] = datetime.now(timezone.utc).isoformat()
         run.job_context, run.status = context, "running"
@@ -89,7 +90,11 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
         }
         await db.commit()
     engine = SupportEngine(
-        mode, _generate_gemini_content, configured_gemini_model, _gemini_http_error
+        mode,
+        _generate_gemini_content,
+        configured_gemini_model,
+        _gemini_http_error,
+        settings=settings,
     )
     started, failure = time.monotonic(), None
     try:
@@ -107,12 +112,14 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
             503, "Draft preparation could not reach its tools or providers."
         )
     async with factory() as db:
-        await set_tenant(db, workspace_id)
+        await set_tenant(db, workspace_id, for_write=True)
         run = await db.scalar(
             select(SupportRun)
             .where(SupportRun.id == run_id, SupportRun.workspace_id == workspace_id)
             .with_for_update()
         )
+        if run is None:
+            return False
         ticket = await db.scalar(
             select(SupportTicket)
             .where(

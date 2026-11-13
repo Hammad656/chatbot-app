@@ -8,16 +8,19 @@ Existing accounts, company documents and support records are preserved.
 The local stack is Next.js, FastAPI, a separate Redis/arq worker, PostgreSQL 17
 with pgvector, and private document storage. The browser uses relative
 `/api/v1` requests; Next.js proxies them to the internal API. Only the web
-service publishes a port. The old `/resolve` address redirects to `/`.
+service publishes a port. The old `/resolve` address redirects to the company dashboard.
 
 ## Start or update
 
 Keep your existing private `backend/.env`, including your PostgreSQL password,
-JWT signing key, and Gemini API key. From the project root on `dev`:
+JWT signing key, and Gemini API key. `JWT_SECRET_KEY` must be a random value of
+at least 32 characters, not a placeholder. Use `COOKIE_SECURE=false` for local
+HTTP and `true` when deploying behind HTTPS. From the project root:
 
 ```powershell
+git switch dev
 git pull --ff-only origin dev
-docker compose --env-file backend/.env up --build -d
+docker compose --env-file backend/.env up --build --force-recreate -d
 docker compose --env-file backend/.env ps
 ```
 
@@ -25,6 +28,35 @@ The API applies additive migrations, provisions non-owner database roles and
 starts serving. The worker handles document ingestion and ticket preparation.
 The PostgreSQL image stays on major version 17, so the existing named database
 volume can be reused. Original uploads now use a private shared volume.
+
+## Authentication and workspaces
+
+- **Sign in:** http://localhost:3000/login
+- **Create account:** http://localhost:3000/signup
+- **Company knowledge chat:** http://localhost:3000/knowledge
+- **API reference:** http://localhost:3000/docs
+- **API schema:** http://localhost:3000/api/v1/openapi.json
+
+New accounts go through `/onboarding` to create their first workspace. The
+creator is its **owner**. Owners and admins can invite agents or admins from
+**Workspace team**, change roles, revoke invitations and remove members.
+Invitation links can be accepted after the invited person signs up; no email
+service or new API key is required. Settings belong to the active workspace.
+
+Access JWTs last 15 minutes, stay in browser memory, and carry the active
+workspace and role. The 30-day opaque refresh cookie is httpOnly; refresh
+values are stored hashed, rotated on use, and a replay revokes the family.
+A workspace switch checks membership and issues a new access token. Every
+business request checks current membership and uses PostgreSQL RLS. Agent
+accounts cannot manage members, inspect admin-only orders/audit data, or
+approve sensitive mock actions.
+
+**After this upgrade, sign in again once.** Existing accounts/passwords,
+company documents, tickets and workspaces remain. Old week-long cookie sessions
+are revoked, and existing workspace creators are promoted to owner.
+
+See the [authentication and tenancy learning guide](docs/AUTH_AND_TENANCY.md)
+for files, endpoint examples, browser behavior and troubleshooting.
 
 ## Pinecone and embeddings
 
@@ -58,8 +90,27 @@ docker compose --env-file backend/.env exec api python check_gemini.py --structu
 - [Original supplied system design](docs/design/ResolveAI_System_Design.pdf)
 - [Uploadable fictional company documents and test guide](docs/demo/README.md)
 
-The broader design includes a public customer widget, rotating refresh tokens,
+The broader design still includes a public customer widget,
 streaming, detailed model-cost accounting and production cloud integrations.
 The implementation map distinguishes those items from the company-dashboard
 workflow delivered here; this repository does not claim a complete production
 rollout or the design's unmeasured latency/evaluation targets.
+
+## Checks
+
+Backend integration tests use real PostgreSQL/pgvector with disposable schemas.
+The browser tests in `frontend/e2e` exercise auth, refresh across tabs, account
+and workspace isolation, the actual ingestion worker, cited chat and invitations.
+They use Local demo mode and spend no model credits. GitHub Actions runs backend,
+frontend and browser checks against an isolated Compose stack.
+
+To run browser checks against your running **development** stack:
+
+```powershell
+cd frontend
+npm ci
+npx playwright install chromium
+npm run test:e2e
+```
+
+The browser checks create synthetic accounts and workspaces.

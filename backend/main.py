@@ -1,30 +1,18 @@
 import asyncio
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
-from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import jwt
 from fastapi import (
-    Depends,
     FastAPI,
     HTTPException,
     Request,
-    Response,
-    status,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pwdlib import PasswordHash
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.gemini import (
@@ -32,141 +20,22 @@ from ai.gemini import (
     _generate_gemini_content,
     configured_gemini_model,
 )
-from database.models import AuthSession, User
-from database.session import engine, get_db
-from database.tenant import set_tenant
+from database.session import engine
 from resolveai.router import build_router
+from resolveai.endpoints import build_scoped_router
+from auth.router import router as auth_router
+from auth.security import require_csrf, session_secret
+from auth.dependencies import get_current_user
+from workspaces.router import router as workspace_router
+from fastapi.responses import RedirectResponse
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
-
-SESSION_COOKIE = "morrow_session"
-CSRF_COOKIE = "morrow_csrf"
-SESSION_MAX_AGE = 60 * 60 * 24 * 7
-PASSWORD_HASHER = PasswordHash.recommended()
-DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash(secrets.token_urlsafe(32))
-
-
-class Credentials(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    email: EmailStr
-    password: str = Field(min_length=12, max_length=128)
-
-
-class UserResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    email: EmailStr
-    created_at: datetime
 
 
 def configured_origins() -> list[str]:
     origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
     return [origin.strip() for origin in origins.split(",") if origin.strip()]
-
-
-def session_secret() -> str:
-    secret = os.getenv("JWT_SECRET_KEY")
-    if not secret:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is not configured. Set JWT_SECRET_KEY in backend/.env.",
-        )
-    return secret
-
-
-async def set_session_cookies(response: Response, user: User, db: AsyncSession) -> None:
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=SESSION_MAX_AGE)
-    auth_session = AuthSession(user_id=user.id, expires_at=expires_at)
-    db.add(auth_session)
-    await db.commit()
-    token = jwt.encode(
-        {
-            "sub": str(user.id),
-            "jti": str(auth_session.id),
-            "iat": now,
-            "exp": expires_at,
-        },
-        session_secret(),
-        algorithm="HS256",
-    )
-    secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-    response.set_cookie(
-        SESSION_COOKIE,
-        token,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        secure=secure,
-        samesite="lax",
-        path="/",
-    )
-
-
-def require_csrf(request: Request) -> None:
-    cookie_token = request.cookies.get(CSRF_COOKIE, "")
-    header_token = request.headers.get("X-CSRF-Token", "")
-    if (
-        not cookie_token
-        or not header_token
-        or not secrets.compare_digest(cookie_token, header_token)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="The security token is missing or invalid. Refresh and try again.",
-        )
-
-
-async def get_current_user(
-    request: Request,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> User:
-    require_database_password()
-    token = request.cookies.get(SESSION_COOKIE)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Please log in to continue.",
-        )
-    try:
-        payload = jwt.decode(token, session_secret(), algorithms=["HS256"])
-        user_id = UUID(payload["sub"])
-        session_id = UUID(payload["jti"])
-    except (jwt.InvalidTokenError, KeyError, ValueError) as error:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your session has expired. Please log in again.",
-        ) from error
-
-    now = datetime.now(timezone.utc)
-    auth_session = await db.scalar(
-        select(AuthSession).where(
-            AuthSession.id == session_id,
-            AuthSession.user_id == user_id,
-            AuthSession.revoked_at.is_(None),
-            AuthSession.expires_at > now,
-        )
-    )
-    user = await db.get(User, user_id)
-    if user is None or auth_session is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your session is no longer valid. Please log in again.",
-        )
-    await set_tenant(db, actor_id=user.id)
-    db.info["request_id"] = getattr(request.state, "request_id", None)
-    return user
-
-
-def require_database_password() -> None:
-    password = os.getenv("POSTGRES_PASSWORD")
-    if not password or password == "replace-with-your-postgres-password":
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database is not configured. Set POSTGRES_PASSWORD in backend/.env.",
-        )
 
 
 @asynccontextmanager
@@ -200,6 +69,8 @@ async def request_identity(request: Request, call_next):
     request.state.request_id = str(uuid4())
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-store"
     return response
 
 
@@ -236,8 +107,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_origins(),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "X-CSRF-Token"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=[
+        "Content-Type",
+        "X-CSRF-Token",
+        "Authorization",
+        "Idempotency-Key",
+        "X-Workspace-ID",
+    ],
 )
 
 
@@ -254,6 +131,27 @@ async def database_unavailable(_: Request, error: SQLAlchemyError):
                 "code": "database_unavailable",
                 "message": "Database unavailable or schema not ready. Check PostgreSQL and run alembic upgrade head from backend.",
                 "request_id": getattr(_.state, "request_id", None),
+            }
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, error: Exception):
+    request_id = getattr(request.state, "request_id", None)
+    logger.error(
+        "Unhandled request error (request_id=%s, type=%s).",
+        request_id,
+        type(error).__name__,
+    )
+    return JSONResponse(
+        status_code=500,
+        headers={"X-Request-ID": request_id or "", "Cache-Control": "no-store"},
+        content={
+            "error": {
+                "code": "internal_error",
+                "message": "The request could not be completed. Please retry or contact your workspace administrator.",
+                "request_id": request_id,
             }
         },
     )
@@ -278,7 +176,9 @@ async def health_check():
 
 
 @app.get("/api/v1/health/ready")
+@app.get("/health/ready", include_in_schema=False)
 async def readiness():
+    session_secret()
     from sqlalchemy import text
 
     from database.session import async_session_factory
@@ -310,6 +210,12 @@ async def readiness():
             raise HTTPException(
                 503, "Run alembic upgrade head for the background job schema."
             )
+    async with async_session_factory() as db:
+        if not await db.scalar(text("SELECT to_regclass('refresh_tokens')")):
+            raise HTTPException(
+                503,
+                "Run alembic upgrade head for authentication and workspace security.",
+            )
     if os.getenv("REDIS_URL"):
         from arq import create_pool
         from arq.connections import RedisSettings
@@ -334,114 +240,22 @@ async def readiness():
     }
 
 
-@app.get("/api/v1/auth/csrf")
-async def csrf_token(response: Response):
-    secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-    token = secrets.token_urlsafe(32)
-    response.set_cookie(
-        CSRF_COOKIE,
-        token,
-        max_age=SESSION_MAX_AGE,
-        httponly=False,
-        secure=secure,
-        samesite="strict",
-        path="/",
-    )
-    return {"csrf_token": token}
+app.include_router(auth_router)
+app.include_router(workspace_router)
 
 
-@app.post("/api/v1/auth/signup", response_model=UserResponse, status_code=201)
-async def signup(
-    credentials: Credentials,
-    response: Response,
-    _: Annotated[None, Depends(require_csrf)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    require_database_password()
-    email = str(credentials.email).strip().lower()
-    existing_user = await db.scalar(select(User).where(User.email == email))
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
-
-    password_hash = await run_in_threadpool(PASSWORD_HASHER.hash, credentials.password)
-    user = User(email=email, password_hash=password_hash)
-    db.add(user)
-    try:
-        await db.commit()
-    except IntegrityError as error:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        ) from error
-
-    await db.refresh(user)
-    await set_session_cookies(response, user, db)
-    return user
-
-
-@app.post("/api/v1/auth/login", response_model=UserResponse)
-async def login(
-    credentials: Credentials,
-    response: Response,
-    _: Annotated[None, Depends(require_csrf)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    require_database_password()
-    email = str(credentials.email).strip().lower()
-    user = await db.scalar(select(User).where(User.email == email))
-    password_matches = await run_in_threadpool(
-        PASSWORD_HASHER.verify,
-        credentials.password,
-        user.password_hash if user else DUMMY_PASSWORD_HASH,
-    )
-    if user is None or not password_matches:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email or password is incorrect.",
-        )
-
-    await set_session_cookies(response, user, db)
-    return user
-
-
-@app.get("/api/v1/auth/me", response_model=UserResponse)
-async def current_user(
-    user: Annotated[User, Depends(get_current_user)],
-):
-    return user
-
-
-@app.post("/api/v1/auth/logout", status_code=204)
-async def logout(
-    request: Request,
-    response: Response,
-    _: Annotated[None, Depends(require_csrf)],
-    __: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    token = request.cookies[SESSION_COOKIE]
-    payload = jwt.decode(token, session_secret(), algorithms=["HS256"])
-    auth_session = await db.get(AuthSession, UUID(payload["jti"]))
-    if auth_session is not None:
-        auth_session.revoked_at = datetime.now(timezone.utc)
-        await db.commit()
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="lax")
-    response.delete_cookie(CSRF_COOKIE, path="/", httponly=False, samesite="strict")
-    response.status_code = status.HTTP_204_NO_CONTENT
-    return response
+@app.get("/docs", include_in_schema=False)
+async def api_reference():
+    return RedirectResponse("/api/v1/docs")
 
 
 # Reuse the existing session/CSRF boundary without circular router imports.
-app.include_router(
-    build_router(
-        get_current_user,
-        require_csrf,
-        _generate_gemini_content,
-        configured_gemini_model,
-        _gemini_http_error,
-    )
+support_router = build_router(
+    get_current_user,
+    require_csrf,
+    _generate_gemini_content,
+    configured_gemini_model,
+    _gemini_http_error,
 )
+app.include_router(support_router)
+app.include_router(build_scoped_router(support_router))

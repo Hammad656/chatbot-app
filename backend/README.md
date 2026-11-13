@@ -7,14 +7,15 @@ Historical personal-chat tables remain archived for data preservation and are
 not granted to the new runtime roles.
 
 Use the [root setup instructions](../README.md) for Docker. In the browser,
-OpenAPI documentation is available at **http://localhost:3000/api/v1/docs**.
+OpenAPI documentation is available at **http://localhost:3000/docs** (also `/api/v1/docs`).
 `/health` is a private-container liveness endpoint; `/api/v1/health/ready` checks
 the migrated schema, vector extension, and runtime role.
 
 ## Configuration
 
 Keep your existing private `.env`. Required settings are PostgreSQL credentials
-and `JWT_SECRET_KEY`. Gemini mode also requires `GEMINI_API_KEY`; `GEMINI_MODEL`
+and a random `JWT_SECRET_KEY` of at least 32 characters. Startup validates it
+without printing it. Gemini mode also requires `GEMINI_API_KEY`; `GEMINI_MODEL`
 defaults to `gemini-flash-latest`. New workspaces use `EMBEDDING_MODEL`, default
 `gemini-embedding-001`. Vector dimension 768 is fixed in the migration.
 `RAG_MIN_SIMILARITY` defaults to 0.35. Pinecone settings are unused.
@@ -39,6 +40,39 @@ arq resolveai.jobs.WorkerSettings
 Those commands belong in separate terminals only for standalone development.
 Docker Compose runs both processes for you. Do not combine an inline worker
 with the dedicated Docker worker; Compose sets `RESOLVEAI_INLINE_WORKER=false`.
+
+## Auth and tenant context
+
+See [the auth/tenancy guide](../docs/AUTH_AND_TENANCY.md). `auth/` owns signup,
+login, access-token validation, refresh rotation/reuse detection and logout.
+`workspaces/` owns onboarding, active workspace switching, settings, invitations
+and membership roles. `database/repository.py` scopes canonical resource APIs
+from the authenticated principal, never a body/query workspace ID.
+
+Authentication endpoints are `POST /api/v1/auth/signup`, `/login`, `/refresh`,
+`/logout`, and `GET /api/v1/auth/me`. Access uses `Authorization: Bearer ...`.
+Cookie-changing auth requests require the CSRF token from `GET /api/v1/auth/csrf`.
+The API's OpenAPI schema exposes the bearer scheme and CSRF header. After
+creating a workspace, call `POST /api/v1/workspaces/{id}/switch` and use the
+returned access token before accessing tenant resources.
+
+The canonical API provides `/workspace/settings`, `/members`, `/members/invite`,
+`/invitations`, `/documents`, `/knowledge/search`, `/knowledge/ask`, `/tickets`,
+`/conversations`, `/mock-orders`, `/analytics/overview` and `/audit-logs` under
+`/api/v1`. Resource lists have scoped cursors where implemented. Compatibility
+workspace-prefixed routes require the URL's workspace to match the signed
+active workspace. Owner/admin restrictions are applied in both API surfaces.
+
+Tenant mutations take a transaction-scoped workspace advisory lock before
+locking child rows, so workspace deletion and worker completion do not invert
+parent/child lock order. Provider work for knowledge answers and ticket drafts
+runs outside that mutation lock. A final access/state check precedes saving.
+Worker cron removes expired refresh families daily through a narrow database
+function; the worker does not receive unrestricted auth-table access.
+
+The API role cannot update/delete audit rows. Account-security events are a
+separate private global log and have no public list API. Workspace deletion
+requires the owner's current role and exact workspace-name confirmation.
 
 ## AI diagnostics
 

@@ -93,8 +93,9 @@ def order_tool(db, workspace_id, customer_email):
 
 
 class SupportEngine:
-    def __init__(self, mode, generate, configured_model, map_error):
+    def __init__(self, mode, generate, configured_model, map_error, settings=None):
         self.mode = mode
+        self.settings = settings or {}
         self.generate = generate
         self.configured_model = configured_model
         self.map_error = map_error
@@ -196,7 +197,11 @@ class SupportEngine:
                 result = await self.structured(
                     Draft,
                     prompt("draft_v1"),
-                    {**state, "server_proposed_action": action},
+                    {
+                        **state,
+                        "server_proposed_action": action,
+                        "tone": self.settings.get("tone", "professional"),
+                    },
                 )
                 valid_ids = {source["id"] for source in sources}
                 inline_ids = {
@@ -266,6 +271,7 @@ class SupportEngine:
                 "question": question,
                 "sources": sources,
                 "conversation_context": history or [],
+                "tone": self.settings.get("tone", "professional"),
             },
         )
         valid = {source["id"] for source in sources}

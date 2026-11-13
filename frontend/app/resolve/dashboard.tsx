@@ -5,14 +5,28 @@ import {
   ReactNode,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import LiquidOrb from "../liquid-orb";
 import Link from "next/link";
-import { APIError, request } from "./api";
+import { useRouter, useParams } from "next/navigation";
+import { TeamPanel, SettingsPanel } from "./workspace-panels";
+import {
+  APIError,
+  request,
+  acceptSession,
+  restoreSession,
+  signOut as endSession,
+  clearSession,
+  subscribeSession,
+  currentUser,
+} from "./api";
 import type {
   Answer,
+  AuthSession,
   Snapshot,
   Source,
   TicketDetail,
@@ -22,7 +36,22 @@ import type {
 import "./support.css";
 
 type View =
-  "overview" | "tickets" | "knowledge" | "orders" | "activity" | "team";
+  | "overview"
+  | "tickets"
+  | "knowledge"
+  | "orders"
+  | "activity"
+  | "team"
+  | "settings";
+const pagePaths: Record<View, string> = {
+  overview: "/dashboard",
+  tickets: "/tickets",
+  knowledge: "/knowledge",
+  orders: "/mock-orders",
+  activity: "/activity",
+  team: "/settings/members",
+  settings: "/settings",
+};
 const pages: { id: View; label: string; icon: string; note: string }[] = [
   {
     id: "overview",
@@ -59,6 +88,12 @@ const pages: { id: View; label: string; icon: string; note: string }[] = [
     label: "Workspace team",
     icon: "users",
     note: "Give teammates the right level of access.",
+  },
+  {
+    id: "settings",
+    label: "Settings",
+    icon: "shield",
+    note: "Your company workspace, your preferences.",
   },
 ];
 function Icon({ name, size = 19 }: { name: string; size?: number }) {
@@ -187,19 +222,42 @@ function money(cents: number, currency: string) {
   );
 }
 
-export default function ResolveAI() {
+export default function ResolveAI({
+  initialView = "knowledge",
+}: {
+  initialView?: View;
+}) {
+  const router = useRouter();
+  const instanceId = useId();
+  const liveProfile = useSyncExternalStore(
+    subscribeSession,
+    currentUser,
+    () => null,
+  );
+  const params = useParams<{ ticketId?: string }>();
+  const ticketParam = params.ticketId;
   const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [token, setToken] = useState("");
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const token = "";
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [view, setView] = useState<View>("knowledge");
-  const [ticket, setTicket] = useState<TicketDetail | null>(null);
+  const view = initialView;
+  const [ticketState, setTicket] = useState<TicketDetail | null>(null);
+  const ticket =
+    ticketState && (!ticketParam || ticketState.id === ticketParam)
+      ? ticketState
+      : null;
   const [reply, setReply] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(false);
+  const workspaceReady = Boolean(snapshot);
+  const authTransition =
+    user === undefined ||
+    (liveProfile
+      ? user?.id !== liveProfile.id ||
+        (!!workspaceId && workspaceId !== liveProfile.active_workspace_id)
+      : !!user);
   const [ticketFilter, setTicketFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<"workspace" | "ticket" | "order" | null>(
@@ -239,19 +297,43 @@ export default function ResolveAI() {
     }
   }, []);
   const chooseWorkspace = useCallback(
-    (id: string) => {
-      activeWorkspace.current = id;
+    async (id: string, alreadyActive = false) => {
+      activeWorkspace.current = "";
       activeTicket.current = "";
       reviewKeys.current.clear();
-      setWorkspaceId(id);
       setSnapshot(null);
+      setModal(null);
       setTicket(null);
       setReply("");
       setNotice("");
       setSearch("");
+      setQuestion("");
       setThreadId(null);
       setConversation({ workspace: id, thread: "new", answers: [] });
-      if (id) void refresh(id);
+      setWorkspaceId(id);
+      if (!id) return;
+      setBusy("switch");
+      try {
+        if (!alreadyActive) {
+          const session = await request<AuthSession>(
+            `/api/v1/workspaces/${id}/switch`,
+            { method: "POST" },
+          );
+          acceptSession(session);
+          setUser(session.user);
+        }
+        activeWorkspace.current = id;
+        await refresh(id);
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "Could not switch workspace.",
+        );
+        setWorkspaceId("");
+      } finally {
+        setBusy("");
+      }
     },
     [refresh],
   );
@@ -259,31 +341,66 @@ export default function ResolveAI() {
     let mounted = true;
     async function restore() {
       try {
-        const csrf = await request<{ csrf_token: string }>("/api/v1/auth/csrf");
-        if (!mounted) return;
-        setToken(csrf.csrf_token);
-        const account = await request<User>("/api/v1/auth/me");
+        const account = await restoreSession();
         const list = await request<Workspace[]>("/api/v1/workspaces");
         if (!mounted) return;
         setUser(account);
         setWorkspaces(list);
-        if (list.length) chooseWorkspace(list[0].id);
+        const selected =
+          list.find(
+            (workspace) => workspace.id === account.active_workspace_id,
+          ) ?? list[0];
+        if (selected)
+          await chooseWorkspace(
+            selected.id,
+            selected.id === account.active_workspace_id,
+          );
       } catch (error) {
         if (!mounted) return;
-        setUser(null);
-        if (!(error instanceof APIError && error.status === 401))
+        if (error instanceof APIError && error.status === 401) {
+          setUser(null);
+          router.replace("/login");
+        } else {
+          setUser(null);
           setNotice(
             error instanceof Error
               ? error.message
-              : "Could not restore session.",
+              : "Could not restore your session.",
           );
+        }
       }
     }
     void restore();
+    const lost = () => {
+      clearSession();
+      setUser(null);
+      activeWorkspace.current = "";
+      setSnapshot(null);
+      router.replace("/login");
+    };
+    window.addEventListener("resolveai-session-ended", lost);
+    const changed = () => {
+      activeWorkspace.current = "";
+      setSnapshot(null);
+      setUser(undefined);
+      window.location.replace("/knowledge");
+    };
+    window.addEventListener("resolveai-workspace-changed", changed);
+    const channel =
+      typeof BroadcastChannel !== "undefined"
+        ? new BroadcastChannel("resolveai-auth")
+        : null;
+    if (channel)
+      channel.onmessage = (event) => {
+        if (event.data === "logout") lost();
+      };
     return () => {
       mounted = false;
+      window.removeEventListener("resolveai-session-ended", lost);
+      window.removeEventListener("resolveai-workspace-changed", changed);
+      channel?.close();
     };
-  }, [chooseWorkspace]);
+  }, [chooseWorkspace, router]);
   useEffect(() => {
     let active = true;
     if (workspaceId && selectedThread !== "new") {
@@ -352,8 +469,35 @@ export default function ResolveAI() {
     };
   }, [snapshot, workspaceId, ticket]);
   useEffect(() => {
-    if (modal) dialog.current?.showModal();
-  }, [modal]);
+    const element = dialog.current;
+    if (modal && !authTransition) element?.showModal();
+    return () => {
+      if (element?.open) element.close();
+    };
+  }, [modal, authTransition]);
+  useEffect(() => {
+    if (!ticketParam || !workspaceId || !workspaceReady) return;
+    let active = true;
+    activeTicket.current = ticketParam;
+    void request<TicketDetail>(
+      `/api/v1/workspaces/${workspaceId}/tickets/${ticketParam}`,
+    )
+      .then((data) => {
+        if (active) {
+          setTicket(data);
+          setReply(data.draft ?? "");
+        }
+      })
+      .catch((error) => {
+        if (active)
+          setNotice(
+            error instanceof Error ? error.message : "Could not load ticket.",
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [ticketParam, workspaceId, workspaceReady]);
 
   async function perform(label: string, operation: () => Promise<void>) {
     setBusy(label);
@@ -370,56 +514,23 @@ export default function ResolveAI() {
       setBusy("");
     }
   }
-  async function authenticate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    await perform("auth", async () => {
-      const account = await request<User>(
-        `/api/v1/auth/${authMode}`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            email: form.get("email"),
-            password: form.get("password"),
-          }),
-        },
-        token,
-      );
-      setUser(account);
-      const list = await request<Workspace[]>("/api/v1/workspaces");
-      setWorkspaces(list);
-      if (list.length) chooseWorkspace(list[0].id);
-    });
-  }
   async function signOut() {
     await perform("logout", async () => {
-      await request("/api/v1/auth/logout", { method: "POST" }, token);
-      const csrf = await request<{ csrf_token: string }>("/api/v1/auth/csrf");
-      setToken(csrf.csrf_token);
+      await endSession();
       setUser(null);
       setWorkspaces([]);
-      chooseWorkspace("");
+      await chooseWorkspace("");
+      router.replace("/login");
     });
   }
   const base = `/api/v1/workspaces/${workspaceId}`;
-  const admin = snapshot?.workspace.role === "admin";
+  const admin =
+    snapshot?.workspace.role === "admin" ||
+    snapshot?.workspace.role === "owner";
   const canReview =
     admin || ["reply", "escalate"].includes(ticket?.proposed_action.kind ?? "");
   async function openTicket(id: string) {
-    activeTicket.current = id;
-    setView("tickets");
-    setTicket(null);
-    const workspace = workspaceId;
-    await perform("ticket", async () => {
-      const data = await request<TicketDetail>(`${base}/tickets/${id}`);
-      if (
-        activeWorkspace.current === workspace &&
-        activeTicket.current === id
-      ) {
-        setTicket(data);
-        setReply(data.draft ?? "");
-      }
-    });
+    router.push(`/tickets/${id}`);
   }
   async function draftTicket() {
     if (!ticket) return;
@@ -487,7 +598,8 @@ export default function ResolveAI() {
         );
         setWorkspaces((current) => [...current, workspace]);
         setModal(null);
-        chooseWorkspace(workspace.id);
+        await chooseWorkspace(workspace.id);
+        router.replace("/knowledge");
       } else if (kind === "ticket") {
         const data = await request<TicketDetail>(
           `${base}/tickets`,
@@ -509,7 +621,7 @@ export default function ResolveAI() {
         activeTicket.current = data.id;
         setTicket(data);
         setReply("");
-        setView("tickets");
+        router.push(`/tickets/${data.id}`);
         await refresh(workspaceId);
       } else {
         await request(
@@ -584,7 +696,7 @@ export default function ResolveAI() {
 
   return (
     <main className="resolve-app">
-      {notice && !modal && (
+      {notice && !modal && !authTransition && (
         <div className="r-notice" role="alert">
           <span>{notice}</span>
           <button aria-label="Dismiss notice" onClick={() => setNotice("")}>
@@ -592,92 +704,28 @@ export default function ResolveAI() {
           </button>
         </div>
       )}
-      {user === undefined ? (
+      {user === undefined || authTransition ? (
         <div className="r-auth-shell">
           <LiquidOrb />
           <p>Preparing your support workspace…</p>
         </div>
       ) : user === null ? (
         <div className="r-auth-shell">
-          <div className="r-auth-story">
-            <div className="r-logo">
-              <Icon name="spark" />
-              <strong>
-                resolve<span>AI</span>
-              </strong>
-            </div>
-            <LiquidOrb />
-            <span className="r-eyebrow">
-              THOUGHTFUL SUPPORT. HUMAN CONTROL.
-            </span>
-            <h1>
-              A clearer path
-              <br />
-              <span>to resolution.</span>
-            </h1>
-            <p>
-              Company knowledge, useful tools, and a human in the loop.
-              <br />
-              Support that works with your team.
-            </p>
-          </div>
           <section className="r-auth-card">
-            <span className="r-small-icon">
-              <Icon name="shield" />
-            </span>
-            <h2>
-              {authMode === "login" ? "Welcome back" : "Create your account"}
-            </h2>
-            <p>Sign in to your company workspace, or create an account.</p>
-            <form onSubmit={authenticate}>
-              <label>
-                Email address
-                <input
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  maxLength={320}
-                  placeholder="you@company.com"
-                />
-              </label>
-              <label>
-                Password
-                <input
-                  name="password"
-                  type="password"
-                  autoComplete={
-                    authMode === "login" ? "current-password" : "new-password"
-                  }
-                  required
-                  minLength={12}
-                  maxLength={128}
-                  placeholder="At least 12 characters"
-                />
-              </label>
-              <button
-                className="r-button r-primary"
-                disabled={!!busy || !token}
-              >
-                {busy === "auth"
-                  ? "One moment…"
-                  : authMode === "login"
-                    ? "Sign in"
-                    : "Create account"}
-                <Icon name="arrow" size={16} />
-              </button>
-            </form>
-            <p className="r-auth-switch">
-              {authMode === "login" ? "New here?" : "Have an account?"}{" "}
-              <button
-                onClick={() => {
-                  setAuthMode(authMode === "login" ? "signup" : "login");
-                  setNotice("");
-                }}
-              >
-                {authMode === "login" ? "Create an account" : "Sign in"}
-              </button>
-            </p>
+            <h1>Sign in to ResolveAI</h1>
+            <p>Continue to your company workspace.</p>
+            <Link className="r-button r-primary" href="/login">
+              Sign in
+            </Link>
+            <Link className="r-button" href="/signup">
+              Create account
+            </Link>
+            <button
+              className="r-text-button"
+              onClick={() => window.location.reload()}
+            >
+              Retry connection
+            </button>
           </section>
         </div>
       ) : (
@@ -692,12 +740,12 @@ export default function ResolveAI() {
               </strong>
             </Link>
             <div className="r-workspace-switch">
-              <label htmlFor="workspace-select">WORKSPACE</label>
+              <label htmlFor={`${instanceId}-workspace`}>WORKSPACE</label>
               <select
-                id="workspace-select"
+                id={`${instanceId}-workspace`}
                 value={workspaceId}
                 disabled={!!busy || !workspaces.length}
-                onChange={(event) => chooseWorkspace(event.target.value)}
+                onChange={(event) => void chooseWorkspace(event.target.value)}
               >
                 {!workspaces.length && (
                   <option value="">Create your first workspace</option>
@@ -717,23 +765,27 @@ export default function ResolveAI() {
               </button>
             </div>
             <nav aria-label="Support navigation">
-              {pages.map((page) => (
-                <button
-                  key={page.id}
-                  className={view === page.id ? "r-nav-active" : ""}
-                  aria-current={view === page.id ? "page" : undefined}
-                  onClick={() => setView(page.id)}
-                >
-                  <Icon name={page.icon} />
-                  <span>{page.label}</span>
-                  {page.id === "tickets" &&
-                    !!snapshot?.metrics.statuses.awaiting_approval && (
-                      <small>
-                        {snapshot.metrics.statuses.awaiting_approval}
-                      </small>
-                    )}
-                </button>
-              ))}
+              {pages
+                .filter(
+                  (page) => admin || !["orders", "activity"].includes(page.id),
+                )
+                .map((page) => (
+                  <Link
+                    key={page.id}
+                    href={pagePaths[page.id]}
+                    className={view === page.id ? "r-nav-active" : ""}
+                    aria-current={view === page.id ? "page" : undefined}
+                  >
+                    <Icon name={page.icon} />
+                    <span>{page.label}</span>
+                    {page.id === "tickets" &&
+                      !!snapshot?.metrics.statuses.awaiting_approval && (
+                        <small>
+                          {snapshot.metrics.statuses.awaiting_approval}
+                        </small>
+                      )}
+                  </Link>
+                ))}
             </nav>
             <div className="r-sidebar-foot">
               <div className="r-control-note">
@@ -747,7 +799,7 @@ export default function ResolveAI() {
               <div className="r-account">
                 <span>{user.email[0].toUpperCase()}</span>
                 <div>
-                  <strong>Your account</strong>
+                  <strong>{user.full_name || "Your account"}</strong>
                   <small title={user.email}>{user.email}</small>
                 </div>
                 <button
@@ -756,7 +808,7 @@ export default function ResolveAI() {
                   onClick={() => void signOut()}
                   disabled={!!busy}
                 >
-                  <Icon name="arrow" size={16} />
+                  Sign out
                 </button>
               </div>
             </div>
@@ -908,7 +960,7 @@ export default function ResolveAI() {
                             <h2>Your support inbox</h2>
                             <button
                               className="r-text-button"
-                              onClick={() => setView("tickets")}
+                              onClick={() => router.push("/tickets")}
                             >
                               View all <Icon name="arrow" size={14} />
                             </button>
@@ -983,7 +1035,7 @@ export default function ResolveAI() {
                           <h2>Latest activity</h2>
                           <button
                             className="r-text-button"
-                            onClick={() => setView("activity")}
+                            onClick={() => router.push("/activity")}
                           >
                             See audit history <Icon name="arrow" size={14} />
                           </button>
@@ -1454,11 +1506,11 @@ export default function ResolveAI() {
                           </button>
                         </div>
                         <form className="r-question-form" onSubmit={ask}>
-                          <label htmlFor="knowledge-question">
+                          <label htmlFor={`${instanceId}-question`}>
                             Your question
                           </label>
                           <textarea
-                            id="knowledge-question"
+                            id={`${instanceId}-question`}
                             value={question}
                             onChange={(event) =>
                               setQuestion(event.target.value)
@@ -1505,7 +1557,7 @@ export default function ResolveAI() {
                       </section>
                     </div>
                   )}
-                  {view === "orders" && (
+                  {view === "orders" && admin && (
                     <section className="r-panel">
                       <div className="r-panel-heading">
                         <div>
@@ -1573,7 +1625,7 @@ export default function ResolveAI() {
                       )}
                     </section>
                   )}
-                  {view === "activity" && (
+                  {view === "activity" && admin && (
                     <section className="r-panel">
                       <div className="r-panel-heading">
                         <h2>Workspace audit trail</h2>
@@ -1618,105 +1670,29 @@ export default function ResolveAI() {
                       )}
                     </section>
                   )}
+                  {!admin && ["orders", "activity"].includes(view) && (
+                    <Empty title="Admin access required">
+                      Ask a workspace owner or admin to access this page.
+                    </Empty>
+                  )}
                   {view === "team" && (
-                    <div className="r-knowledge-grid">
-                      <section className="r-panel">
-                        <div className="r-panel-heading">
-                          <h2>Your team</h2>
-                          <Icon name="users" />
-                        </div>
-                        {admin ? (
-                          snapshot.members.map((m) => (
-                            <div className="r-member" key={m.email}>
-                              <span className="r-ticket-avatar">
-                                {m.email[0].toUpperCase()}
-                              </span>
-                              <strong>{m.email}</strong>
-                              <Badge value={m.role} />
-                            </div>
-                          ))
-                        ) : (
-                          <p className="r-mini-note">
-                            Admins manage the team. Your role allows preparing
-                            drafts and reading workspace knowledge.
-                          </p>
-                        )}
-                        <div className="r-role-guide">
-                          <h3>Admin</h3>
-                          <p>
-                            Manage documents and members. Review replies and
-                            execute approved mock actions.
-                          </p>
-                          <h3>Agent</h3>
-                          <p>
-                            Read knowledge, create tickets, prepare drafts, and
-                            leave feedback. Sensitive execution stays with
-                            admins.
-                          </p>
-                        </div>
-                      </section>
-                      <section className="r-panel">
-                        <div className="r-panel-heading">
-                          <h2>Add a teammate</h2>
-                        </div>
-                        {admin ? (
-                          <form
-                            className="r-stacked-form"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              const form = event.currentTarget;
-                              const data = new FormData(form);
-                              void perform("member", async () => {
-                                await request(
-                                  `${base}/members`,
-                                  {
-                                    method: "POST",
-                                    body: JSON.stringify({
-                                      email: data.get("email"),
-                                      role: data.get("role"),
-                                    }),
-                                  },
-                                  token,
-                                );
-                                form.reset();
-                                await refresh(workspaceId);
-                              });
-                            }}
-                          >
-                            <p className="r-mini-note">
-                              Your teammate must register first. This adds an
-                              existing account; no email is sent.
-                            </p>
-                            <label>
-                              Teammate email
-                              <input
-                                name="email"
-                                type="email"
-                                required
-                                placeholder="teammate@company.com"
-                              />
-                            </label>
-                            <label>
-                              Workspace role
-                              <select name="role">
-                                <option value="agent">Agent</option>
-                                <option value="admin">Admin</option>
-                              </select>
-                            </label>
-                            <button
-                              className="r-button r-primary"
-                              disabled={!!busy}
-                            >
-                              Add teammate <Icon name="plus" size={15} />
-                            </button>
-                          </form>
-                        ) : (
-                          <Empty title="Admin access required">
-                            Ask a workspace admin to manage teammates.
-                          </Empty>
-                        )}
-                      </section>
-                    </div>
+                    <TeamPanel
+                      key={workspaceId}
+                      workspace={snapshot.workspace}
+                      user={user}
+                    />
+                  )}
+                  {view === "settings" && (
+                    <SettingsPanel
+                      key={workspaceId}
+                      workspace={snapshot.workspace}
+                      onSaved={async () => {
+                        await refresh(workspaceId);
+                        setWorkspaces(
+                          await request<Workspace[]>("/api/v1/workspaces"),
+                        );
+                      }}
+                    />
                   )}
                 </>
               )}
@@ -1728,15 +1704,15 @@ export default function ResolveAI() {
           </section>
         </div>
       )}
-      {modal && (
+      {modal && !authTransition && user && (
         <dialog
           className="r-dialog"
           ref={dialog}
-          aria-labelledby="resolve-dialog-title"
+          aria-labelledby={`${instanceId}-dialog`}
           onClose={() => setModal(null)}
         >
           <div className="r-dialog-heading">
-            <h2 id="resolve-dialog-title">
+            <h2 id={`${instanceId}-dialog`}>
               {modal === "workspace"
                 ? "Create a workspace"
                 : modal === "ticket"

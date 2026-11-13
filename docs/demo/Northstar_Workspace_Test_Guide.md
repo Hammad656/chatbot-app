@@ -10,10 +10,10 @@ The keyboard, lamp, and sleeve prices deliberately match the application's built
 
 ## 2. Upload and first test
 
-1. Open http://localhost:3000 and sign in.
+1. Open http://localhost:3000/login and sign in, or use /signup to register and create your first workspace.
 2. Create a fresh workspace named Northstar Workspace QA. Choose Local demo for a no-provider-key test, or Gemini if your Gemini and pgvector configuration is already working. Workspace mode is fixed at creation.
 3. Open Knowledge base and upload ONE version of Northstar_Workspace_Company_Knowledge_Base: PDF, DOCX, or Markdown. The contents are the same. Uploading all three creates repeated evidence and unnecessary indexing work.
-4. Wait for the document status to become Ready. The default inline worker processes the upload in the background. If it shows Failed, inspect the visible error before retrying. Gemini mode can fail on provider credentials, index configuration, network access, or quota.
+4. Wait for the document status to become Ready. The separate Redis/arq worker processes the upload in the background. If it shows Failed, inspect the visible error before retrying. Gemini mode can fail on provider credentials, index configuration, network access, or quota.
 5. Ask one question, expand its sources, and compare the cited source text with this guide. For a clean knowledge test, do not load unrelated documents or generic sample policies into this workspace.
 6. Start with K01, K04, K11, K17, K21, K29, K32, K36, K41, and K45. Run the larger checklist only if useful; it is not necessary to spend model requests on every row.
 
@@ -252,7 +252,7 @@ F01. Shipping lookup: open the Where is my order? ticket for alex@example.com an
 
 F02. Damaged-product replacement: open My item arrived damaged for maya@example.com and ORD-1002. Prepare a draft and inspect the policy evidence and proposed replacement. Expected: the order remains delivered while awaiting approval. The reviewer must manually check the fuller fictional policy's evidence requirements before approving. For a synthetic exercise, make those review assumptions explicit in the test notes.
 
-F03. Human gate and execution: approve F02 as a workspace admin. Expected: one mock replacement action; order becomes replacement_requested; its refundable/replaceable flags become false; the approved reply and review outcome are recorded. No actual lamp is shipped, and no external email is sent.
+F03. Human gate and execution: approve F02 as a workspace owner or admin. Expected: one mock replacement action; order becomes replacement_requested; its refundable/replaceable flags become false; the approved reply and review outcome are recorded. No actual lamp is shipped, and no external email is sent.
 
 F04. Refund flow: open Request a refund for nora@example.com and ORD-1003 and prepare a draft. The order remains delivered until approval. Expected proposal: full USD 49 mock order refund based on the fixture flags and matching policy evidence. The existing demo does not calculate restocking deductions, invoice taxes, or partial line-item refunds. Use the synthetic fixture as a no-deduction review case, rather than treating it as a test of commercial amount calculation.
 
@@ -262,7 +262,7 @@ F06. Customer mismatch: create a new ticket using ORD-1001 but another synthetic
 
 F07. Missing order and safe escalation: create a refund ticket referencing ORD-9999, which you have not created in the workspace. Expected: lookup_order returns not found; the mock workflow proposes escalation rather than a refund. A catalog price or refund paragraph cannot substitute for an actual matching order.
 
-F08. Roles and duplicate protection: register a second synthetic account and add it as a workspace agent. It can prepare drafts but cannot approve actions. After an admin approves an eligible order resolution, a new ticket for the same resolved order must not obtain another eligible financial action. For an exact same-request retry, inspect the API/test implementation's idempotency behavior rather than deliberately generating new financial requests.
+F08. Roles and duplicate protection: register a second synthetic account, create an invitation from Workspace team, and accept it using that invited email. An agent can prepare drafts and approve low-risk replies/escalations, but cannot approve refunds or replacements, manage members, or change workspace settings. After an admin approves an eligible order resolution, a new ticket for the same resolved order must not obtain another eligible financial action. For an exact same-request retry, inspect the API/test implementation's idempotency behavior rather than deliberately generating new financial requests.
 
 The eight exercises cover preparation, a read-only tool, evidence, human review, mock mutation, rejection, customer scoping, absent records, roles, and duplicate protection. Resetting a draft does not reset an order. If you need to repeat an approval scenario, use a fresh workspace or create a new synthetic eligible order through the authorized UI.
 

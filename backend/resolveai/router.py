@@ -3,13 +3,12 @@
 import asyncio
 import hashlib
 import json
-import os
 import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +32,8 @@ from database.models import (
 )
 from database.session import get_db
 from database.tenant import set_tenant
+from auth.dependencies import Principal
+from workspaces.service import create as create_workspace_service
 from resolveai.documents import MAX_UPLOAD_BYTES, safe_filename
 from resolveai.jobs import enqueue_document, enqueue_draft
 from resolveai.knowledge import retrieve
@@ -97,7 +98,11 @@ def audit(db, workspace_id, actor_id, event, ticket_id=None, **details):
 
 
 async def member(db, workspace_id, user_id, admin=False):
-    await set_tenant(db, workspace_id, user_id)
+    if str(workspace_id) != db.info.get("active_workspace_id"):
+        raise HTTPException(
+            404,
+            "Workspace not found. Select it through the workspace switch endpoint first.",
+        )
     row = (
         await db.execute(
             select(Workspace, WorkspaceMember.role)
@@ -107,8 +112,10 @@ async def member(db, workspace_id, user_id, admin=False):
     ).first()
     if row is None:
         raise HTTPException(404, "Workspace not found.")
-    if admin and row[1] != "admin":
-        raise HTTPException(403, "Only workspace admins can perform this operation.")
+    if admin and row[1] not in ("owner", "admin"):
+        raise HTTPException(
+            403, "Only workspace owners and admins can perform this operation."
+        )
     return row[0], row[1]
 
 
@@ -199,9 +206,15 @@ async def detail(db, ticket):
 
 async def reserve_run(db, workspace, ticket_id=None):
     # Serialize budget checks across processes, rather than an in-memory counter.
-    await db.scalar(
-        select(Workspace).where(Workspace.id == workspace.id).with_for_update()
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"),
+        {"key": workspace.id.int & ((1 << 63) - 1)},
     )
+    if (
+        await db.scalar(select(Workspace.id).where(Workspace.id == workspace.id))
+        is None
+    ):
+        raise HTTPException(401, "Workspace access changed. Refresh your session.")
     recent = await db.scalar(
         select(func.count())
         .select_from(SupportRun)
@@ -230,8 +243,10 @@ async def reserve_run(db, workspace, ticket_id=None):
 def build_router(current_user, csrf, generate, configured_model, map_error):
     router = APIRouter(prefix="/api/v1", tags=["ResolveAI"])
 
-    def engine(mode):
-        return SupportEngine(mode, generate, configured_model, map_error)
+    def engine(mode, settings=None):
+        return SupportEngine(
+            mode, generate, configured_model, map_error, settings=settings
+        )
 
     @router.get("/workspaces")
     async def list_workspaces(
@@ -256,41 +271,17 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         user: User = Depends(current_user),
         db: AsyncSession = Depends(get_db),
     ):
-        if body.ai_mode == "gemini" and (not os.getenv("GEMINI_API_KEY")):
-            raise HTTPException(
-                503,
-                "Gemini workspaces require GEMINI_API_KEY. Company embeddings are stored in PostgreSQL/pgvector. Local demo mode needs no provider keys.",
-            )
-        # Per-account limit is serialized by the user row.
-        await db.scalar(select(User).where(User.id == user.id).with_for_update())
-        count = await db.scalar(
-            select(func.count())
-            .select_from(Workspace)
-            .where(Workspace.owner_id == user.id)
+        principal = Principal(
+            user,
+            UUID(db.info["session_id"]),
+            (
+                UUID(db.info["active_workspace_id"])
+                if db.info.get("active_workspace_id")
+                else None
+            ),
+            db.info.get("principal_role"),
         )
-        if count >= 10:
-            raise HTTPException(
-                409, "This account already owns the maximum of ten workspaces."
-            )
-        workspace = Workspace(
-            name=body.name,
-            owner_id=user.id,
-            ai_mode=body.ai_mode,
-            embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
-        )
-        db.add(workspace)
-        await db.flush()
-        await set_tenant(db, workspace.id, user.id)
-        db.add(
-            WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin")
-        )
-        audit(db, workspace.id, user.id, "workspace.created", mode=body.ai_mode)
-        await db.commit()
-        await db.refresh(workspace)
-        return {
-            **fields(workspace, "id", "name", "ai_mode", "created_at"),
-            "role": "admin",
-        }
+        return await create_workspace_service(db, principal, body)
 
     @router.get("/workspaces/{workspace_id}/overview")
     async def overview(
@@ -395,16 +386,18 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                     "replaceable",
                 )
                 for o in orders
+                if role in ("owner", "admin")
             ],
             "audit": [
                 fields(
                     e, "id", "event", "ticket_id", "actor_id", "details", "created_at"
                 )
                 for e in events
+                if role in ("owner", "admin")
             ],
             "members": (
                 [{"email": email, "role": r} for email, r in members]
-                if role == "admin"
+                if role in ("owner", "admin")
                 else []
             ),
             "answers": [
@@ -775,10 +768,10 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
     ):
         _, role = await member(db, workspace_id, user.id)
         ticket = await ticket_in_workspace(db, workspace_id, ticket_id, lock=True)
-        if (
-            ticket.proposed_action.get("kind") in ("refund", "replacement")
-            and role != "admin"
-        ):
+        if ticket.proposed_action.get("kind") in (
+            "refund",
+            "replacement",
+        ) and role not in ("owner", "admin"):
             raise HTTPException(
                 403, "An administrator must review this sensitive action."
             )
@@ -1033,7 +1026,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         run = await reserve_run(db, workspace)
         await db.commit()
         run_id = run.id
-        service = engine(workspace.ai_mode)
+        service = engine(workspace.ai_mode, workspace.settings)
         started = time.monotonic()
         try:
             async with asyncio.timeout(30):
@@ -1052,10 +1045,11 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                 answer = await service.answer(body.question, sources, history)
         except Exception as error:
             await db.rollback()
+            await set_tenant(db, workspace_id, for_write=True)
             run = await db.get(SupportRun, run_id)
             if run is None:
                 raise HTTPException(
-                    403,
+                    401,
                     "Workspace access changed while answering. Reload and sign in again.",
                 ) from None
             run.status, run.error = (
@@ -1077,6 +1071,20 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             if isinstance(error, HTTPException):
                 raise
             raise HTTPException(503, run.error) from error
+        # Providers run without a tenant mutation lock. Recheck access and serialize
+        # the final write with workspace deletion before publishing an answer.
+        await db.commit()
+        await set_tenant(db, workspace_id, for_write=True)
+        run = await db.scalar(
+            select(SupportRun)
+            .where(SupportRun.id == run_id, SupportRun.workspace_id == workspace_id)
+            .execution_options(populate_existing=True)
+        )
+        if run is None:
+            raise HTTPException(
+                401,
+                "Workspace access changed while answering. Reload and sign in again.",
+            )
         if thread is None:
             thread = KnowledgeThread(
                 workspace_id=workspace_id, created_by=user.id, title=body.question[:100]

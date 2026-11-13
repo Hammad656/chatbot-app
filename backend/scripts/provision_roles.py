@@ -49,7 +49,7 @@ async def provision():
                 await connection.exec_driver_sql(
                     f"GRANT USAGE ON SCHEMA public TO {role}"
                 )
-            from database.security import TENANT_TABLES
+            from database.security_v2 import TENANT_TABLES
 
             for table in (*TENANT_TABLES, "support_members"):
                 permissions = (
@@ -64,6 +64,15 @@ async def provision():
                 "GRANT SELECT, INSERT, UPDATE ON users, auth_sessions, support_workspaces TO resolveai_app"
             )
             await connection.exec_driver_sql(
+                "GRANT DELETE ON support_workspaces TO resolveai_app"
+            )
+            await connection.exec_driver_sql(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON refresh_tokens TO resolveai_app"
+            )
+            await connection.exec_driver_sql(
+                "GRANT INSERT ON authentication_events TO resolveai_app"
+            )
+            await connection.exec_driver_sql(
                 "GRANT SELECT ON support_workspaces TO resolveai_worker"
             )
             await connection.exec_driver_sql(
@@ -71,6 +80,18 @@ async def provision():
             )
             await connection.exec_driver_sql(
                 "GRANT EXECUTE ON FUNCTION public.resolveai_member(uuid, uuid) TO resolveai_app, resolveai_worker"
+            )
+            await connection.exec_driver_sql(
+                "REVOKE ALL ON FUNCTION public.resolveai_admin(uuid,uuid),public.resolveai_accept_invitation(text,uuid) FROM PUBLIC"
+            )
+            await connection.exec_driver_sql(
+                "GRANT EXECUTE ON FUNCTION public.resolveai_admin(uuid,uuid) TO resolveai_app,resolveai_worker"
+            )
+            await connection.exec_driver_sql(
+                "GRANT EXECUTE ON FUNCTION public.resolveai_accept_invitation(text,uuid) TO resolveai_app"
+            )
+            await connection.exec_driver_sql(
+                "GRANT EXECUTE ON FUNCTION public.resolveai_purge_expired_tokens() TO resolveai_worker"
             )
         print(
             "ResolveAI runtime roles are ready; API and worker do not own business tables."

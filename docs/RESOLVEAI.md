@@ -3,7 +3,7 @@
 ResolveAI is the main application at **http://localhost:3000**. The personal CV
 chatbot has been retired. Company knowledge chat, documents, support tickets,
 mock orders, review controls, activity and team membership live in one dashboard.
-The original `/resolve` bookmark redirects to `/`.
+The original `/resolve` bookmark redirects to `/knowledge`.
 
 Read the [system-design implementation map](architecture.md) alongside this
 guide. It records the exact differences between the requested dashboard
@@ -163,11 +163,23 @@ owner. The worker is trusted only for the workspace carried by each job; its
 dispatcher can enumerate workspace IDs to recover pending jobs. The runtime
 roles are not granted access to archived personal-chat tables.
 
-Accounts retain the existing revocable JWT-cookie and CSRF implementation.
-Admins manage documents, mock orders, members and sensitive review decisions;
-agents can investigate and prepare drafts. This is not yet the PDF's rotating
-access/refresh-token family implementation. Error responses use an error code,
-safe message and request ID. API keys remain server-side.
+Authentication now uses the PDF's 15-minute access JWT and 30-day rotating
+refresh family. Access credentials stay in browser memory; the refresh cookie is
+httpOnly and refresh values are hashed in PostgreSQL. Reuse revokes the whole
+family, logout revokes the current family, and current membership/role is checked
+for every request. Owners, admins and agents have separate permissions.
+
+The active workspace comes from the signed JWT. Switching validates membership
+and returns a new token; a body/query/compatibility-path ID cannot silently
+change tenant context. New signups go through onboarding. Dedicated `/login`
+and `/signup` pages make authentication visible instead of hiding it in the
+home screen. Owners/admins invite teammates, manage roles and remove members;
+only the owner can delete a workspace with name confirmation. Login/refresh,
+role changes, invitation acceptance and deletion are audited.
+
+Read [Authentication and tenancy](AUTH_AND_TENANCY.md) for the request flow,
+files and API examples. All APIs use a safe error message and request ID. No new
+paid API or key is needed for authentication or workspace membership.
 
 ## 7. AI boundary and debugging
 
@@ -196,10 +208,10 @@ observed usage, not invented dollar costs.
 
 | Location                                         | Responsibility                                                              |
 | ------------------------------------------------ | --------------------------------------------------------------------------- |
-| `frontend/app/page.tsx`                          | Main ResolveAI application                                                  |
+| `frontend/app/page.tsx`                          | Redirect to the company dashboard                                           |
 | `frontend/app/resolve/dashboard.tsx`             | Unified dashboard, documents and persistent company chat                    |
 | `frontend/next.config.ts`                        | Same-origin API proxy                                                       |
-| `backend/main.py`                                | App, authentication, health, request IDs and error contract                 |
+| `backend/main.py`                                | App composition, health, request IDs and error contract                     |
 | `backend/resolveai/router.py`                    | Authenticated product API and approval boundary                             |
 | `backend/resolveai/documents.py`                 | Safe file parsing and chunking                                              |
 | `backend/resolveai/knowledge.py`                 | Company-only pgvector/keyword retrieval                                     |
@@ -226,7 +238,7 @@ python -m alembic check
 ```
 
 Frontend checks are `npm run lint` and `npm run build`. Native mobile, a public
-customer widget/SSE, refresh-token rotation, production GCS/Cloud Run,
+customer widget/SSE, production GCS/Cloud Run,
 OpenTelemetry/Sentry and complete per-call dollar-cost accounting remain
 separate items in the implementation map. The current work does not claim
 their deployment or the PDF's unmeasured p95/evaluation targets.

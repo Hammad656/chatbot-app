@@ -168,7 +168,7 @@
   flex-direction: column;
   gap: 7px;
 }
-.r-sidebar nav button {
+.r-sidebar nav :is(button, a) {
   display: flex;
   width: 100%;
   min-height: 43px;
@@ -182,7 +182,7 @@
   font-size: 12px;
   text-align: left;
 }
-.r-sidebar nav button:hover {
+.r-sidebar nav :is(button, a):hover {
   background: #c1a1e30c;
   color: #f0ddff;
 }
@@ -1363,7 +1363,7 @@
   background: #c7a0e510;
   color: #dbb5f4;
 }
-.r-auth-card h2 {
+.r-auth-card :is(h1, h2) {
   margin: 0 0 12px;
   color: #f0dffb;
   font-size: 26px;
@@ -1524,7 +1524,7 @@
     padding-bottom: 11px;
     scrollbar-width: thin;
   }
-  .r-sidebar nav button {
+  .r-sidebar nav :is(button, a) {
     width: auto;
     min-height: 36px;
     flex: 0 0 auto;
@@ -1745,5 +1745,102 @@
   }
   .r-chat-toolbar label {
     flex-basis: 100%;
+  }
+}
+
+.r-sidebar nav a {
+  text-decoration: none;
+}
+.r-auth-switch a {
+  color: #d7b8ff;
+  text-decoration: none;
+}
+.r-password-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.r-password-field input {
+  min-width: 0;
+  flex: 1;
+}
+.r-account button {
+  width: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding: 6px;
+  font-size: 11px;
+}
+.r-team-settings {
+  display: grid;
+  gap: 24px;
+}
+.r-team-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.r-team-member > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.r-team-member form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.r-team-member select {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #191423;
+  color: var(--foreground);
+}
+.r-team-member .r-button {
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+.r-invite-link {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+.r-invite-link textarea {
+  width: 100%;
+  resize: vertical;
+  margin-top: 8px;
+}
+.r-settings-panel {
+  max-width: 760px;
+}
+.r-danger-zone {
+  margin-top: 36px;
+  padding-top: 24px;
+  border-top: 1px solid #edb2b230;
+}
+.r-danger-zone p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+@media (max-width: 700px) {
+  .r-team-member {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .r-team-member form {
+    width: 100%;
+  }
+  .r-password-field input {
+    width: 0;
+  }
+  .r-account button {
+    max-width: none;
   }
 }

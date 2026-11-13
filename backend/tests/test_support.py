@@ -12,6 +12,9 @@ from resolveai.workflow import local_triage
 async def create_workspace(client):
     response = await client.post("/api/v1/workspaces", json={"name": "Test business"})
     assert response.status_code == 201, response.text
+    switch = await client.post(f"/api/v1/workspaces/{response.json()['id']}/switch")
+    assert switch.status_code == 200, switch.text
+    client.headers["Authorization"] = "Bearer " + switch.json()["access_token"]
     return response.json()["id"]
 
 
@@ -89,6 +92,7 @@ async def test_queued_draft_losing_requester_access_stops_before_model(support_c
         )
     ).status_code == 201
     ticket = snapshot["tickets"][0]
+    await support_context.activate(agent, workspace)
     path = f"/api/v1/workspaces/{workspace}/tickets/{ticket['id']}"
     queued = await agent.post(path + "/draft")
     assert queued.status_code == 202
@@ -215,7 +219,14 @@ async def test_agent_permissions(support_context):
             prefix + "/members", json={"email": "agent@example.com", "role": "agent"}
         )
     ).status_code == 201
+    await support_context.activate(agent, workspace)
     assert (await agent.get(prefix + "/overview")).status_code == 200
+    restricted = (await agent.get(prefix + "/overview")).json()
+    assert (
+        restricted["orders"] == []
+        and restricted["audit"] == []
+        and restricted["members"] == []
+    )
     assert (
         await agent.post(path + "/review", json=review_body(ticket))
     ).status_code == 403
@@ -367,7 +378,7 @@ async def test_csrf_validation_and_seed_idempotency(support_context):
     workspace = await create_workspace(client)
     prefix = f"/api/v1/workspaces/{workspace}"
     token = client.headers.pop("X-CSRF-Token")
-    assert (await client.post(prefix + "/demo")).status_code == 403
+    assert (await client.post("/api/v1/auth/refresh")).status_code == 403
     client.headers["X-CSRF-Token"] = token
     await demo(support_context, client, workspace)
     snapshot = await demo(support_context, client, workspace)

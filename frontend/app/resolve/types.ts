@@ -1,9 +1,21 @@
-export type User = { id: string; email: string };
+export type User = {
+  id: string;
+  email: string;
+  full_name: string;
+  active_workspace_id: string | null;
+  role: "owner" | "admin" | "agent" | null;
+};
+export type AuthSession = {
+  access_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: User;
+};
 export type Workspace = {
   id: string;
   name: string;
   ai_mode: "local" | "gemini";
-  role: "admin" | "agent";
+  role: "owner" | "admin" | "agent";
 };
 export type Source = {
   id: number;

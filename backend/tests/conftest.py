@@ -20,6 +20,7 @@ async def support_context(monkeypatch, tmp_path):
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("JWT_SECRET_KEY", "temporary-integration-test-signing-key")
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
     monkeypatch.setenv("POSTGRES_PASSWORD", "nonempty-test-configuration-guard")
     schema = "resolveai_test_" + uuid4().hex
     admin = create_async_engine(POSTGRES_URL)
@@ -32,6 +33,9 @@ async def support_context(monkeypatch, tmp_path):
     )
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        from database.security_v2 import install_invitation_function
+
+        await connection.run_sync(lambda c: install_invitation_function(c, schema))
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def test_db():
@@ -57,10 +61,17 @@ async def support_context(monkeypatch, tmp_path):
             },
         )
         assert response.status_code == 201, response.text
+        client.headers["Authorization"] = "Bearer " + response.json()["access_token"]
         return client
 
+    async def activate(client, workspace_id):
+        response = await client.post(f"/api/v1/workspaces/{workspace_id}/switch")
+        assert response.status_code == 200, response.text
+        client.headers["Authorization"] = "Bearer " + response.json()["access_token"]
+        return response.json()
+
     try:
-        yield SimpleNamespace(account=account, factory=factory)
+        yield SimpleNamespace(account=account, factory=factory, activate=activate)
     finally:
         app.dependency_overrides.pop(get_db, None)
         for client in clients:

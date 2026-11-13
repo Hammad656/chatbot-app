@@ -87,7 +87,17 @@ async def retrieve(
         workspace = await db.get(Workspace, workspace_id)
         vector = (await embed_texts([query], workspace.embedding_model, query=True))[0]
         distance = BusinessChunk.embedding.cosine_distance(vector)
-        threshold = max(0.0, min(1.0, float(os.getenv("RAG_MIN_SIMILARITY", "0.35"))))
+        threshold = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    workspace.settings.get(
+                        "similarity_threshold", os.getenv("RAG_MIN_SIMILARITY", "0.35")
+                    )
+                ),
+            ),
+        )
         candidates = (
             await db.execute(
                 select(

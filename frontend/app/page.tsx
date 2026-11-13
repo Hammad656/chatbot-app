@@ -1,5 +1,4 @@
-import ResolveAI from "./resolve/dashboard";
-
+import { redirect } from "next/navigation";
 export default function Home() {
-  return <ResolveAI />;
+  redirect("/knowledge");
 }

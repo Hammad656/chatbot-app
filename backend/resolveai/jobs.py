@@ -8,7 +8,7 @@ from uuid import UUID
 
 from arq import Retry, create_pool, cron
 from arq.connections import RedisSettings
-from sqlalchemy import DateTime, and_, cast, func, or_, select
+from sqlalchemy import DateTime, and_, cast, func, or_, select, text
 
 from database.models import BusinessDocument, SupportRun, Workspace
 from database.session import async_session_factory
@@ -45,7 +45,7 @@ async def ingest_document(ctx, workspace_id, document_id):
     workspace_id, document_id = UUID(workspace_id), UUID(document_id)
     await process_once(workspace_id=workspace_id, document_id=document_id)
     async with async_session_factory() as db:
-        await set_tenant(db, workspace_id)
+        await set_tenant(db, workspace_id, for_write=True)
         document = await db.get(BusinessDocument, document_id)
         if document and document.status == "failed" and document.attempts < 3:
             document.status = "queued"
@@ -83,7 +83,7 @@ async def prepare_ticket(ctx, workspace_id, run_id):
     workspace_id, run_id = UUID(workspace_id), UUID(run_id)
     await process_ticket_once(workspace_id=workspace_id, run_id=run_id)
     async with async_session_factory() as db:
-        await set_tenant(db, workspace_id)
+        await set_tenant(db, workspace_id, for_write=True)
         run = await db.get(SupportRun, run_id)
         if run and run.status == "queued":
             raise Retry(
@@ -95,7 +95,7 @@ async def dispatch_pending(ctx):
     async with async_session_factory() as db:
         workspaces = list((await db.scalars(select(Workspace.id))).all())
         for workspace_id in workspaces:
-            await set_tenant(db, workspace_id)
+            await set_tenant(db, workspace_id, for_write=True)
             documents = (
                 await db.scalars(
                     select(BusinessDocument).where(
@@ -155,10 +155,17 @@ async def dispatch_pending(ctx):
             await db.commit()
 
 
+async def purge_expired_tokens(ctx):
+    async with async_session_factory() as db:
+        await db.execute(text("SELECT resolveai_purge_expired_tokens()"))
+        await db.commit()
+
+
 class WorkerSettings:
     functions = [ingest_document, prepare_ticket]
     cron_jobs = [
-        cron(dispatch_pending, second={0, 10, 20, 30, 40, 50}, run_at_startup=True)
+        cron(dispatch_pending, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
+        cron(purge_expired_tokens, hour=3, minute=15, second=0),
     ]
     redis_settings = RedisSettings.from_dsn(
         os.getenv("REDIS_URL", "redis://localhost:6379/0")

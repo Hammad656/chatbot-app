@@ -31,6 +31,10 @@ class User(Base):
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    full_name: Mapped[str] = mapped_column(String(100), default="", server_default="")
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -63,7 +67,48 @@ class AuthSession(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    active_workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="SET NULL"), nullable=True
+    )
     user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("auth_sessions.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AuthenticationEvent(Base):
+    """Account-security events are global, never exposed through tenant APIs."""
+
+    __tablename__ = "authentication_events"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event: Mapped[str] = mapped_column(String(60))
+    subject_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class UserCV(Base):
@@ -155,6 +200,16 @@ class Workspace(Base):
     )
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100))
+    slug: Mapped[str] = mapped_column(
+        String(120), unique=True, default=lambda: uuid.uuid4().hex
+    )
+    widget_public_key: Mapped[str] = mapped_column(
+        String(64), unique=True, default=lambda: uuid.uuid4().hex
+    )
+    allowed_origins: Mapped[list] = mapped_column(
+        JSON, default=list, server_default="[]"
+    )
+    settings: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT")
     )
@@ -167,12 +222,20 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class WorkspaceMember(Base):
     __tablename__ = "support_members"
     __table_args__ = (
-        CheckConstraint("role IN ('admin', 'agent')", name="support_member_role"),
+        CheckConstraint(
+            "role IN ('owner', 'admin', 'agent')", name="support_member_role"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, unique=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("support_workspaces.id", ondelete="CASCADE"), primary_key=True
@@ -183,6 +246,36 @@ class WorkspaceMember(Base):
     role: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class WorkspaceInvitation(Base):
+    __tablename__ = "support_invitations"
+    __table_args__ = (
+        CheckConstraint("role IN ('admin', 'agent')", name="support_invitation_role"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    email: Mapped[str] = mapped_column(String(320))
+    role: Mapped[str] = mapped_column(String(16))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    accepted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

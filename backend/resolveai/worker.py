@@ -25,7 +25,7 @@ async def process_once(
 ) -> bool:
     async with factory() as db:
         if workspace_id is not None:
-            await set_tenant(db, workspace_id)
+            await set_tenant(db, workspace_id, for_write=True)
         document = await db.scalar(
             select(BusinessDocument)
             .where(
@@ -118,7 +118,7 @@ async def process_once(
                     else [None] * len(chunks)
                 )
         async with factory() as db:
-            await set_tenant(db, workspace_id)
+            await set_tenant(db, workspace_id, for_write=True)
             current = await db.scalar(
                 select(BusinessDocument)
                 .where(
@@ -177,7 +177,7 @@ async def process_once(
             )
         )
         async with factory() as db:
-            await set_tenant(db, workspace_id)
+            await set_tenant(db, workspace_id, for_write=True)
             current = await db.scalar(
                 select(BusinessDocument)
                 .where(

@@ -215,6 +215,7 @@ async def test_failed_knowledge_run_retains_safe_provider_status(
     )
     assert response.status_code == 201, response.text
     workspace_id = response.json()["id"]
+    await support_context.activate(client, workspace_id)
     failure = HTTPException(502, "Gemini rejected the generation request (HTTP 400).")
 
     async def fail(*args, **kwargs):

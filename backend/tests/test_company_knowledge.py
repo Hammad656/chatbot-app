@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, text
 
 from database.models import BusinessChunk, BusinessDocument
-from database.security import install_rls
+from database.security_v2 import install_security as install_rls
 from database.tenant import set_tenant
 from resolveai.storage import path_for
 from resolveai.worker import process_once
@@ -15,6 +15,9 @@ from resolveai.worker import process_once
 async def workspace(client, name="Company"):
     response = await client.post("/api/v1/workspaces", json={"name": name})
     assert response.status_code == 201, response.text
+    switch = await client.post(f"/api/v1/workspaces/{response.json()['id']}/switch")
+    assert switch.status_code == 200, switch.text
+    client.headers["Authorization"] = "Bearer " + switch.json()["access_token"]
     return response.json()["id"]
 
 
@@ -74,6 +77,7 @@ async def test_thread_and_sources_cannot_cross_workspace_boundaries(support_cont
     client = await support_context.account()
     outsider = await support_context.account()
     a, b = await workspace(client, "Company A"), await workspace(client, "Company B")
+    await support_context.activate(client, a)
     await document(support_context, client, a)
     answer = (
         await client.post(
@@ -81,6 +85,7 @@ async def test_thread_and_sources_cannot_cross_workspace_boundaries(support_cont
         )
     ).json()
     thread = answer["thread_id"]
+    await support_context.activate(client, b)
     assert (
         await client.get(f"/api/v1/workspaces/{b}/threads/{thread}")
     ).status_code == 404
@@ -110,6 +115,7 @@ async def test_gemini_workspace_needs_no_pinecone_and_empty_knowledge_is_free(
         "/api/v1/workspaces", json={"name": "Company semantic", "ai_mode": "gemini"}
     )
     assert created.status_code == 201
+    await support_context.activate(client, created.json()["id"])
     with patch(
         "ai.gemini.genai.Client",
         side_effect=AssertionError("No provider calls without ready sources"),
