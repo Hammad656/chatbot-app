@@ -1,329 +1,232 @@
-# ResolveAI: implementation and learning guide
+# ResolveAI: workflow and learning guide
 
-ResolveAI extends the existing Morrow project. `/` remains your CV assistant;
-`/resolve` is a support workspace. Accounts, revocable session cookies, CSRF
-protection, PostgreSQL, document parsing, and the Gemini/Pinecone configuration
-are reused. Work stays on `dev`.
+ResolveAI is the main application at **http://localhost:3000**. The personal CV
+chatbot has been retired. Company knowledge chat, documents, support tickets,
+mock orders, review controls, activity and team membership live in one dashboard.
+The original `/resolve` bookmark redirects to `/`.
 
-## What this version includes
+Read the [system-design implementation map](architecture.md) alongside this
+guide. It records the exact differences between the requested dashboard
+workflow and the full supplied production/MVP blueprint.
 
-- Multi-tenant workspaces with admin and agent roles.
-- A private support inbox and customer-request simulator.
-- PDF, DOCX, UTF-8 TXT and Markdown knowledge ingestion.
-- A durable PostgreSQL document queue with visible status and bounded retries.
-- Document-grounded Q&A with stored source excerpts.
-- A four-node LangGraph preparation workflow and a typed LangChain order tool.
-- Classification, priority, routing, proposed resolutions and editable replies.
-- Durable human approval/rejection, stale-state protection and idempotent mock execution.
-- A mock order service, simulated delivery inbox, review history and feedback.
-- Read-only application audit history and recent model/run metrics.
-- PostgreSQL integration tests, an evaluation fixture, Docker Compose, and GitHub Actions.
+## 1. Start or upgrade
 
-This is a web MVP, not a native mobile app or a connected commercial help desk.
-Customer requests are entered by an authenticated workspace teammate. There is
-no public customer portal, email inbox ingestion, real payment, shipment,
-invitation email, billing system or external outbound delivery. Responsive web
-screens work on mobile. MCP, a native Expo app and real help-desk connectors
-remain future integrations rather than empty scaffolding.
+Keep your existing private `backend/.env` and PostgreSQL volume. With Docker
+Desktop's engine running, execute from your project root on `dev`:
 
-## 1. Start it locally
+```powershell
+git pull --ff-only origin dev
+docker compose --env-file backend/.env up --build -d
+docker compose --env-file backend/.env ps
+```
 
-Use your existing private `backend/.env`; do not overwrite its database or
-signing settings. PostgreSQL must be running with the configured database.
+The stack has web, API, worker, PostgreSQL/pgvector and Redis services. Only web
+publishes port 3000. The API applies migrations and provisions non-owner roles
+before its readiness check succeeds; the worker starts after that. Every
+Compose command needs `--env-file backend/.env` for configuration interpolation.
 
-Windows PowerShell, from the repository root:
+```powershell
+docker compose --env-file backend/.env logs --tail 80 api worker
+docker compose --env-file backend/.env stop
+docker compose --env-file backend/.env start
+```
+
+`stop` preserves containers and networks. Company documents and the database
+use persistent named volumes. Windows shell-script line endings are normalized
+during the backend image build.
+
+## 2. Pinecone, pgvector and your existing data
+
+The attached design explicitly chooses PostgreSQL with pgvector and no separate
+vector database. This version follows that choice. `PINECONE_API_KEY` and
+`PINECONE_INDEX_NAME` are unused and can be removed after upgrading successfully.
+No replacement Pinecone index is required, and the application neither deletes
+nor modifies the old Pinecone index.
+
+Keep `GEMINI_API_KEY` for Gemini-mode generation and embeddings. The default
+embedding model is `gemini-embedding-001`, with 768-dimensional vectors. A
+workspace records its embedding model when created. Changing the environment
+default affects new workspaces, not existing embeddings. A different model
+requires a deliberate workspace-wide re-embedding migration; never mix models.
+
+Migrations add the vector column, HNSW cosine index, document-storage metadata,
+knowledge conversations and RLS policies. Existing accounts and support records
+are preserved. Prior company answers are placed in a history conversation.
+Existing Gemini documents are queued for embedding from stored chunks, so a
+previously processed document normally does not need to be uploaded again.
+Historical personal-chat tables remain archived and are not exposed by an API.
+
+The database image remains PostgreSQL major version 17 while adding pgvector.
+This preserves compatibility with the existing Compose database volume instead
+of attempting a downgrade to the PDF's example version 16.
+
+## 3. Company knowledge pipeline
+
+1. An authenticated admin uploads a PDF, DOCX, UTF-8 TXT or Markdown file, up to
+   20 MB. The API checks the extension/signature, computes a checksum, and rejects
+   duplicate content within that workspace.
+2. The file is stored under an opaque random key in a private shared volume;
+   a document row is committed in PostgreSQL. Only then is its ID dispatched
+   through Redis. Redis never needs the complete document body or provider key.
+3. The arq worker reloads that workspace/document, establishes its transaction-
+   local tenant context, claims a lease and parses text.
+4. Markdown/DOCX headings become metadata. Text becomes overlapping approximately
+   500-token passages using a 2,000-character limit and 240-character overlap.
+   PDF page labels provide a fallback source location. Scanned PDFs require OCR
+   before upload; this application does not include OCR.
+5. In Gemini mode, the shared AI layer requests embeddings in batches of at most
+   64 and normalizes the 768-dimensional vectors. Local mode skips this call.
+6. Chunks and embeddings are replaced atomically in PostgreSQL; the document
+   becomes Ready. The original private upload remains available for reindexing.
+7. Failures retry with bounded backoff, up to three attempts. The dashboard shows
+   failures and exposes retry/reindex controls. A periodic dispatcher recovers
+   committed queued jobs if Redis was temporarily unavailable.
+
+Parsing limits are 80 PDF pages, 500,000 extracted characters, 24 MB expanded
+DOCX data and 500 passages per document. A workspace holds at most 20 documents.
+Deleting a document immediately removes it from future retrieval; the worker
+removes its chunks, vectors and private file. Historical approved replies and
+answer excerpts remain as review history.
+
+## 4. Chat in the Knowledge base dashboard
+
+Choose a fresh workspace and open Knowledge base. Upload one file and wait for
+Ready. Ask a question in **Company knowledge chat**. Answers retain their
+supporting passages, which you can expand. **New chat** starts a separate
+conversation; the conversation selector restores previous company threads.
+
+For a follow-up such as "And what is its warranty?", recent questions help
+resolve the subject. The model receives bounded conversation context, but prior
+answers are not accepted as evidence. It must ground its new answer in the
+currently retrieved company excerpts. A thread ID from another workspace is
+rejected, including when the same account belongs to both workspaces.
+
+Gemini-mode retrieval embeds the question, searches this workspace's Ready
+chunks by pgvector cosine distance, considers eight candidates, drops those
+below `RAG_MIN_SIMILARITY` (default 0.35), and keeps at most five sources.
+If no supported evidence exists, the assistant says information is missing.
+Generated answers must use valid returned citation IDs.
+
+Local mode performs keyword ranking and returns labelled excerpts. It needs no
+provider key, does not store semantic vectors and does not provide a reasoning
+model's conversational synthesis. Gemini mode uses the configured provider's
+quota for both embeddings and answers; errors do not silently switch modes.
+
+For an uploadable corpus, use the [Northstar demo pack](demo/README.md). Upload
+one company PDF/DOCX/Markdown copy, and keep the expected-answer guide separate.
+
+## 5. Ticket preparation and human review
+
+Create a ticket or load the built-in synthetic demo data in Local mode. Choose
+Prepare draft. The API records a queued run and responds with Processing;
+Redis dispatches it to the worker. The dashboard polls and displays the result.
+The API does not wait for classification/retrieval/drafting to finish.
+
+The worker's bounded Python pipeline is:
+
+```text
+Classify -> retrieve company policies -> inspect a matching order -> draft
+                                                     -> await human review
+```
+
+The supplied design deliberately uses ordinary Python orchestration, so the
+previous LangGraph dependency and graph builder are removed. The typed
+read-only order tool retains Pydantic validation. Its workspace and customer
+scope come from server records; the model cannot supply a URL, SQL or tenant ID.
+One run has a 30-second preparation budget, and job retries are bounded.
+
+Nothing in preparation mutates an order or delivers a reply. An administrator
+reviews financial/replacement proposals. Approval locks the ticket and order,
+re-checks current policy and eligibility, checks the revision, and executes the
+mock database action atomically with its decision/message/audit record.
+Repeating the same request replays its decision; another ticket cannot refund
+an already resolved order. A rejection records the decision without mutation.
+
+The current order service and reply inbox are simulations. Approval changes a
+local order record; it does not call a payment processor, carrier, or email API.
+The design's separate action-execution/delivery jobs are required before adding
+real external effects; the current mock transaction is intentionally retained.
+Rich policy conditions such as delivery dates, photos and partial restocking
+calculations still require human inspection; mock eligibility flags do not
+prove every condition in an uploaded commercial policy.
+
+## 6. Isolation and permissions
+
+Business data carries a workspace ID. Routes verify membership before reading
+or changing records. PostgreSQL RLS supplies a second wall even if a query
+omits its application-level filter. Transactions set `app.user_id` and
+`app.workspace_id` locally, and context is restored after commit/rollback.
+
+Compose runs the API as `resolveai_app` and jobs as `resolveai_worker`. Neither
+owns business tables, is a superuser or bypasses RLS. Migrations use the original
+owner. The worker is trusted only for the workspace carried by each job; its
+dispatcher can enumerate workspace IDs to recover pending jobs. The runtime
+roles are not granted access to archived personal-chat tables.
+
+Accounts retain the existing revocable JWT-cookie and CSRF implementation.
+Admins manage documents, mock orders, members and sensitive review decisions;
+agents can investigate and prepare drafts. This is not yet the PDF's rotating
+access/refresh-token family implementation. Error responses use an error code,
+safe message and request ID. API keys remain server-side.
+
+## 7. AI boundary and debugging
+
+`backend/ai/gemini.py` centralizes model access, fallback handling, diagnostics,
+strict structured-output validation and one repair attempt. Versioned prompts
+live under `backend/ai/prompts`. `backend/ai/embeddings.py` owns embedding calls.
+Business routes and preparation logic do not call a provider SDK directly.
+
+Pydantic's `additionalProperties` keyword is removed only from schemas sent to
+Gemini; returned data remains strict. Citation validation rejects invented
+source IDs. Credential-like generated output is blocked. Retrieved documents,
+customer messages and previous answers are reference data, never approval or
+instructions to execute an action.
+
+```powershell
+docker compose --env-file backend/.env exec api python check_gemini.py --structured --embeddings
+```
+
+This uses synthetic data and provider quota. A ready document establishes
+ingestion, not generation availability. Model, quota, key and schema errors are
+reported separately with redacted provider diagnostics. Request IDs and stored
+run/audit metadata help investigate failures. Dashboard token counts are
+observed usage, not invented dollar costs.
+
+## 8. Files and verification
+
+| Location                                         | Responsibility                                                              |
+| ------------------------------------------------ | --------------------------------------------------------------------------- |
+| `frontend/app/page.tsx`                          | Main ResolveAI application                                                  |
+| `frontend/app/resolve/dashboard.tsx`             | Unified dashboard, documents and persistent company chat                    |
+| `frontend/next.config.ts`                        | Same-origin API proxy                                                       |
+| `backend/main.py`                                | App, authentication, health, request IDs and error contract                 |
+| `backend/resolveai/router.py`                    | Authenticated product API and approval boundary                             |
+| `backend/resolveai/documents.py`                 | Safe file parsing and chunking                                              |
+| `backend/resolveai/knowledge.py`                 | Company-only pgvector/keyword retrieval                                     |
+| `backend/resolveai/storage.py`                   | Opaque private upload storage                                               |
+| `backend/resolveai/jobs.py`                      | Redis/arq dispatch and recovery                                             |
+| `backend/resolveai/worker.py`                    | Idempotent document ingestion/reindexing                                    |
+| `backend/resolveai/tickets.py`                   | Background ticket preparation                                               |
+| `backend/database/tenant.py`                     | Transaction-local tenant context                                            |
+| `backend/database/security.py`                   | RLS policies and membership predicate                                       |
+| `backend/database/migrations/versions/0005_*.py` | Additive pgvector/thread/storage migration and historical text re-embedding |
+| `backend/database/migrations/versions/0006_*.py` | Durable draft-job metadata                                                  |
+
+Run backend tests against a pgvector-enabled development database, with a role
+able to create disposable test schemas. Tests explicitly translate ORM tables
+into random schemas while resolving the vector extension from public; they do
+not use or drop the application's tables. RLS tests use a non-owner role and
+deliberately omit the workspace filter. Provider tests use a local HTTP
+transport, and vector tests exercise the actual database cosine operator.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m alembic upgrade head
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload
+python -m pytest -q
+python -m alembic check
 ```
 
-In a second terminal:
-
-```powershell
-cd frontend
-npm ci
-npm run dev
-```
-
-Visit `/resolve` using your normal local app address. You can sign in with an
-existing Morrow account, or create one. Choose **Create workspace → Local demo**.
-Then choose **Load demo data**. Wait until the two sample documents are ready.
-Open the inbox, choose **Request a refund**, and choose **Prepare draft**.
-Inspect sources and the `lookup_order` trace. The order remains delivered until
-you approve. Edit the reply and choose **Approve & run mock action**. The mock
-order changes to refunded and the approved reply appears in the review history.
-
-Useful second exercises:
-
-1. Handle the damaged-item ticket and inspect the replacement proposal.
-2. Reject a proposal and check that its order remains unchanged.
-3. Ask “What is our refund policy?” in Knowledge base and expand its sources.
-4. Upload an invalid PDF, inspect the failed job, and test its retry limit.
-5. Create another account and add it as an agent. It can prepare drafts but not approve.
-6. Create a second workspace and verify that its documents/inbox are separate.
-
-For a larger uploadable corpus, use the [Northstar Workspace demo knowledge pack](demo/README.md).
-It includes a fictional company knowledge base in PDF, DOCX and Markdown, plus
-a separate guide with 60 questions and workflow exercises. Upload one knowledge
-file; keep the expected-answer guide outside the workspace knowledge base.
-
-Linux/macOS commands use `.venv/bin/python` instead of the Windows interpreter
-path. Install dependencies and run Alembic from `backend`, where `alembic.ini`
-and the Python modules live.
-
-### Background worker
-
-The API starts the document worker by default:
-
-```env
-RESOLVEAI_INLINE_WORKER=true
-```
-
-For a separate worker process, set that to `false`, restart the API, then run:
-
-```powershell
-cd backend
-.\.venv\Scripts\python.exe -m resolveai.worker
-```
-
-Multiple workers claim different jobs with `FOR UPDATE SKIP LOCKED`. Processed
-jobs survive restarts because the queue is stored in PostgreSQL. A processing
-lease older than five minutes is reclaimable. A job has at most three attempts;
-visible failures can be retried explicitly. Remove an irrecoverable file and
-upload a corrected version.
-
-### Local demo and Gemini mode are different
-
-| Mode       | Retrieval                                    | Drafting                      | Provider keys                         |
-| ---------- | -------------------------------------------- | ----------------------------- | ------------------------------------- |
-| Local demo | Keyword ranking over PostgreSQL chunks       | Explicit rule-based templates | None                                  |
-| Gemini     | Integrated Pinecone embeddings/vector search | Gemini structured outputs     | Existing Gemini and Pinecone settings |
-
-Local demo is intentionally labeled throughout the UI. It is not an LLM,
-semantic embedding model, or evidence of live provider access. It makes the
-workflow runnable without paid API calls. The workspace mode is fixed at
-creation so existing documents cannot silently switch indexing providers.
-
-For a Gemini workspace, configure the existing `GEMINI_API_KEY`, `GEMINI_MODEL`,
-`PINECONE_API_KEY` and `PINECONE_INDEX_NAME` securely. The index must support the
-existing integrated `text` embedding field. Run `python check_gemini.py --test`
-to check your own key/model/quota. Provider failures remain visible; the service
-does not silently switch a Gemini workspace to local demo behavior.
-
-For the support JSON-answer path, also run
-`docker compose --env-file backend/.env exec api python check_gemini.py --structured`
-from the repository root (or `python check_gemini.py --structured` from backend
-when running without Docker). This uses synthetic data and one generation
-request. A ready document confirms ingestion, not Gemini answer generation.
-ResolveAI strips the unsupported `additionalProperties` schema keyword before
-calling Gemini, while keeping `extra="forbid"` and all other Pydantic validation
-on returned answers. Rebuild the API image after pulling this fix; existing
-documents and vectors can stay in place.
-
-The PDF suggested pgvector as one stack option. This implementation keeps your
-existing Pinecone integration for hosted embeddings rather than introducing a
-second vector platform and a PostgreSQL extension requirement.
-
-## 2. Read the implementation in this order
-
-| File                                             | Learn from it                                                                                  |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `backend/resolveai/schemas.py`                   | Pydantic validation: allowed actions, roles, limits and typed tool inputs                      |
-| `backend/database/models.py`                     | Workspaces, memberships, documents, chunks, tickets, orders, runs, decisions and audit records |
-| `backend/database/migrations/versions/0004_*.py` | Additive migration; existing users and CV chats remain intact                                  |
-| `backend/resolveai/knowledge.py`                 | Parsing, chunking, keyword retrieval, hosted embeddings and citation construction              |
-| `backend/resolveai/worker.py`                    | Durable job claiming, leases, retries, indexing and cleanup                                    |
-| `backend/resolveai/workflow.py`                  | LangGraph state/nodes, the LangChain tool and structured Gemini requests                       |
-| `backend/resolveai/router.py`                    | Authentication, tenant checks, budgets, workflow orchestration and atomic approval             |
-| `frontend/app/resolve/api.ts`                    | Shared cookie/CSRF-aware API client and actionable errors                                      |
-| `frontend/app/resolve/types.ts`                  | UI contracts for documents, tickets, sources, traces and metrics                               |
-| `frontend/app/resolve/page.tsx`                  | Workspace selection, inbox, review, knowledge Q&A, orders, audit and team screens              |
-| `frontend/app/resolve/support.css`               | Scoped dark glass styling and responsive layouts                                               |
-| `backend/tests/test_support.py`                  | Executable examples of core flows, isolation, concurrency and failure behavior                 |
-
-A missing standard Alembic `script.py.mako` template was added so future
-`alembic revision --autogenerate` commands work normally.
-
-## 3. Follow one ticket through the system
-
-```mermaid
-flowchart LR
-  A[Authenticated request] --> B[Check workspace membership]
-  B --> C[Reserve budget and persist running state]
-  C --> D[Classify]
-  D --> E[Retrieve workspace policies]
-  E --> F[Validated order lookup]
-  F --> G[Prepare draft and proposal]
-  G --> H[Persist awaiting approval]
-  H --> I[Admin reviews current revision]
-  I --> J[Recheck sources and lock order]
-  J --> K[Atomic mock action, reply and audit]
-```
-
-**State** is a typed dictionary carrying the ticket, classification, retrieved
-sources, order result, tool calls and draft between graph nodes. The graph has
-fixed edges and a recursion limit of eight; it is not an unrestricted agent loop.
-
-**LangChain's tool** is `lookup_order`, built with `@tool` and a Pydantic input
-schema. Its workspace and customer-email context are supplied by the server.
-The model cannot choose another tenant, arbitrary SQL, arbitrary URLs, or a
-refund endpoint. The graph invokes the approved tool with `.ainvoke()`.
-This is a validated workflow tool call; the first version does not use an
-open-ended model function-calling loop.
-
-**Gemini classification** returns a validated category, priority, proposed action
-and optional order reference. A second structured request prepares a response
-using only retrieved policy and verified order evidence. Generated source IDs
-are checked against supplied sources. Missing evidence leads to escalation.
-Model output cannot directly change an order.
-
-**The approval boundary is stored in PostgreSQL.** Preparation finishes when the
-ticket reaches `awaiting_approval`; a later review request performs the gated
-transition. This is not a LangGraph `interrupt()`/checkpointer implementation.
-A browser/API restart does not lose pending reviews because their state,
-revision, sources and proposal are in the database. LangGraph checkpointers can
-be added for workflows that need to pause inside the graph itself.
-
-## 4. Why approval is reliable
-
-A review contains a request UUID, expected ticket revision, decision and edited
-reply. The server checks admin membership and locks the ticket row.
-
-- A repeated request with the same parameters returns the stored result.
-- Reusing an idempotency key with changed parameters returns 409.
-- A stale revision returns 409 rather than approving a newer draft accidentally.
-- Removed/deleting policy documents invalidate pending evidence.
-- Sensitive actions recheck the current order's customer, status, amount and eligibility.
-- The order row is locked, so separate tickets cannot refund the same order twice.
-- The mock order update, approved reply, decision and audit events commit in one transaction.
-- Rejection records a decision without changing the order.
-
-These guarantees apply to this PostgreSQL-backed mock service. A real payment
-or messaging integration would require a durable outbox and provider-side
-idempotency; a database transaction alone cannot make an external API exactly-once.
-
-The approved reply is recorded in a simulated inbox (`support_messages`). No
-email or chat message is sent to another person.
-
-## 5. Knowledge pipeline and isolation
-
-1. An admin uploads a supported nonempty file up to 8 MB.
-2. The API stores a queued job, content checksum and temporary file bytes.
-3. A worker parses it with the existing PDF/DOCX safety limits, or UTF-8 text parsing.
-4. Text becomes overlapping character chunks (1,200 characters, 180 overlap).
-5. In Gemini mode, Pinecone embeds and indexes the `text` field.
-6. Chunk metadata and source text are saved in PostgreSQL; the document becomes ready.
-7. Original bytes are cleared after success. Failed uploads retain bytes for retry until removed.
-
-CVs use the existing `user-<uuid>` namespaces. Support documents use separate
-`support-workspace-<uuid>` namespaces. Hosted queries also filter to ready
-document IDs, and each hit is matched back to authorized database chunks.
-Failed/deleting documents never become retrieval context.
-
-Deleting a document first removes it from retrieval eligibility, then cleans up
-vectors/chunks through the worker. Existing answers, drafts and audit history
-retain their recorded excerpts for review; deletion does not rewrite past
-conversations. Pending approvals recheck evidence and must be regenerated if a
-source was removed. Scanned PDFs still need OCR before upload.
-
-## 6. Roles, limits and API behavior
-
-Admins manage knowledge and teammates, create mock orders and review proposals.
-Agents can read workspace data, create tickets, prepare drafts, ask questions and
-leave feedback. Adding a teammate requires an existing registered account; no
-invitation email is sent. Roles are workspace-scoped.
-
-Every support object route checks membership and scopes IDs to that workspace.
-Nonmembers receive 404; members without the required role receive 403. State-
-changing requests reuse the existing session-bound CSRF protection. Pydantic
-rejects undeclared request fields and invalid tool/action values.
-
-Bounds: ten owned workspaces per account, twenty documents per workspace, at
-most 150 chunks per document, and ten workflow/Q&A requests per minute per
-workspace. Budget checks use a database lock and include failures. The inbox
-shows the latest 100 tickets; audit shows 100 events and Q&A shows 20 answers.
-Run metrics summarize the latest 50 runs.
-
-A workflow uses at most two structured model stages. The existing Gemini helper
-can retry a failed stage once with an advertised alternative model on 404/503;
-quota/key errors are not retried across models. Ticket preparation is bounded
-by a 100-second deadline. Model responses and documents remain untrusted input.
-
-## 7. Observability and evaluation
-
-Each preparation/knowledge run records mode, model, prompt version, duration,
-reported model tokens and completion/failure. Local demo reports zero model
-tokens. Dollar costs are not invented; pricing, embedding usage and hosting
-costs depend on your providers and are not calculated by this MVP.
-
-Audit events record workspace/member/document changes, workflow outcomes and
-review/execution decisions. They are read-only through this API, not a
-cryptographically tamper-proof log against a database administrator. Workflow
-traces expose validated tool calls to authorized teammates. Raw secrets and
-full prompts are not added to audit events.
-
-The initial local classification evaluation covers shipping, refund,
-replacement, billing and general questions. It is a small regression fixture,
-not a benchmark of Gemini quality. Extend it with anonymized real examples,
-expected sources, expected tools/actions and refusal/escalation cases.
-
-## 8. Test and deploy
-
-With PostgreSQL running, from `backend`:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m alembic upgrade head
-.\.venv\Scripts\python.exe -m alembic check
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Integration fixtures create and remove random `resolveai_test_<uuid>` schemas,
-never drop your application database. The test database role must be able to
-create schemas. Use a dedicated development/CI database, never production.
-Provider-specific tests use mocks; local-mode integration tests exercise real
-PostgreSQL and the actual LangGraph/tool/approval pipeline.
-
-From `frontend`, run `npm run lint` and `npm run build`. Stop your own active
-Next development server before building into the same `.next` directory.
-
-Docker, from the root:
-
-```powershell
-docker compose --env-file backend/.env up --build -d
-docker compose --env-file backend/.env ps -a
-docker compose --env-file backend/.env logs --tail 80 api
-```
-
-Pass `--env-file backend/.env` to every Compose command, including `ps`, `logs`
-and `down`. The service-level `env_file` populates the API container; it does
-not supply `${POSTGRES_PASSWORD}` when Compose reads `compose.yaml`. Omitting
-the flag can report a missing password even when `backend/.env` is configured.
-
-On Windows, Git can convert shell scripts to CRLF line endings. Linux `/bin/sh`
-then rejects the startup script's `set -eu` line and exits with code 2. The
-repository keeps shell scripts in LF and the backend image normalizes the
-entrypoint during its build, including older Windows checkouts. If the API
-exits during startup, inspect its logs using the command above; the frontend
-waits for the API to become healthy. After pulling a startup fix, rebuild:
-
-```powershell
-docker compose --env-file backend/.env up --build -d
-```
-
-Compose uses a separate PostgreSQL volume with an initially empty database; it
-does not import your existing host database. Ports 3000/8000 must be free. The
-API applies migrations before serving, and its document worker runs inline.
-Set `NEXT_PUBLIC_API_URL` at frontend build time and `CORS_ORIGINS` in backend
-configuration for any non-local deployment. Use HTTPS and secure cookies for a
-public deployment. Keep `.env` private; the Docker build contexts exclude it.
-
-GitHub Actions installs dependencies, migrates a temporary PostgreSQL service,
-checks migration drift, runs backend tests, lints and builds the frontend.
-Publishing to GCP/Cloud Run is a separate step requiring your project,
-credentials, domains and hosting settings. Production-scale rate limiting,
-external side-effect delivery, customer-facing channels, comprehensive model
-quality evaluation and native mobile are later phases.
+Frontend checks are `npm run lint` and `npm run build`. Native mobile, a public
+customer widget/SSE, refresh-token rotation, production GCS/Cloud Run,
+OpenTelemetry/Sentry and complete per-call dollar-cost accounting remain
+separate items in the implementation map. The current work does not claim
+their deployment or the PDF's unmeasured p95/evaluation targets.

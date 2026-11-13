@@ -2,22 +2,21 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+from sqlalchemy import func, select
+
 from database.models import DemoOrder, SupportDecision, SupportMessage
 from resolveai.worker import process_once
 from resolveai.workflow import local_triage
-from sqlalchemy import func, select
 
 
 async def create_workspace(client):
-    response = await client.post(
-        "/api/support/workspaces", json={"name": "Test business"}
-    )
+    response = await client.post("/api/v1/workspaces", json={"name": "Test business"})
     assert response.status_code == 201, response.text
     return response.json()["id"]
 
 
 async def demo(context, client, workspace):
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     assert (await client.post(prefix + "/demo")).status_code == 200
     for _ in range(4):
         if not await process_once(context.factory):
@@ -25,13 +24,100 @@ async def demo(context, client, workspace):
     return (await client.get(prefix + "/overview")).json()
 
 
+async def prepare_draft(context, client, path):
+    from resolveai.tickets import process_ticket_once
+
+    response = await client.post(path + "/draft")
+    assert response.status_code == 202, response.text
+    queued = response.json()
+    assert queued["status"] == "processing" and queued["draft"] is None
+    workspace_id = UUID(path.split("/workspaces/")[1].split("/")[0])
+    for _ in range(3):
+        await process_ticket_once(
+            context.factory,
+            workspace_id=workspace_id,
+            run_id=UUID(queued["runs"][0]["id"]),
+        )
+        response = await client.get(path)
+        if response.json()["runs"][0]["status"] != "queued":
+            break
+    return response
+
+
+async def test_background_draft_acknowledges_and_replays_without_repreparing(
+    support_context,
+):
+    from resolveai.tickets import process_ticket_once
+
+    client = await support_context.account()
+    workspace = await create_workspace(client)
+    snapshot = await demo(support_context, client, workspace)
+    ticket = next(t for t in snapshot["tickets"] if t["subject"] == "Request a refund")
+    path = f"/api/v1/workspaces/{workspace}/tickets/{ticket['id']}"
+    queued = await client.post(path + "/draft")
+    assert queued.status_code == 202 and queued.json()["draft"] is None
+    run = UUID(queued.json()["runs"][0]["id"])
+    assert await process_ticket_once(
+        support_context.factory, workspace_id=UUID(workspace), run_id=run
+    )
+    assert not await process_ticket_once(
+        support_context.factory, workspace_id=UUID(workspace), run_id=run
+    )
+    detail = (await client.get(path)).json()
+    assert detail["status"] == "awaiting_approval"
+    state = (await client.get(f"/api/v1/workspaces/{workspace}/overview")).json()
+    assert (
+        next(o for o in state["orders"] if o["reference"] == "ORD-1003")["status"]
+        == "delivered"
+    )
+
+
+async def test_queued_draft_losing_requester_access_stops_before_model(support_context):
+    from sqlalchemy import delete
+
+    from database.models import WorkspaceMember
+    from resolveai.tickets import process_ticket_once
+
+    owner, agent = await support_context.account(), await support_context.account()
+    workspace = await create_workspace(owner)
+    snapshot = await demo(support_context, owner, workspace)
+    user = (await agent.get("/api/v1/auth/me")).json()
+    assert (
+        await owner.post(
+            f"/api/v1/workspaces/{workspace}/members",
+            json={"email": user["email"], "role": "agent"},
+        )
+    ).status_code == 201
+    ticket = snapshot["tickets"][0]
+    path = f"/api/v1/workspaces/{workspace}/tickets/{ticket['id']}"
+    queued = await agent.post(path + "/draft")
+    assert queued.status_code == 202
+    async with support_context.factory() as db:
+        await db.execute(
+            delete(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == UUID(workspace),
+                WorkspaceMember.user_id == UUID(user["id"]),
+            )
+        )
+        await db.commit()
+    with patch("resolveai.workflow.SupportEngine.graph", AsyncMock()) as model:
+        await process_ticket_once(
+            support_context.factory,
+            workspace_id=UUID(workspace),
+            run_id=UUID(queued.json()["runs"][0]["id"]),
+        )
+        model.assert_not_awaited()
+    detail = (await owner.get(path)).json()
+    assert detail["status"] == "open" and detail["runs"][0]["status"] == "failed"
+
+
 async def prepared(context, subject="Request a refund"):
     client = await context.account()
     workspace = await create_workspace(client)
     snapshot = await demo(context, client, workspace)
     ticket = next(t for t in snapshot["tickets"] if t["subject"] == subject)
-    path = f"/api/support/workspaces/{workspace}/tickets/{ticket['id']}"
-    response = await client.post(path + "/draft")
+    path = f"/api/v1/workspaces/{workspace}/tickets/{ticket['id']}"
+    response = await prepare_draft(context, client, path)
     assert response.status_code == 200, response.text
     return client, workspace, path, response.json()
 
@@ -53,9 +139,7 @@ async def test_human_gate_and_order_tool(support_context):
         ticket["queue"] == "Billing" and ticket["proposed_action"]["kind"] == "refund"
     )
     assert ticket["sources"] and ticket["tool_calls"][0]["name"] == "lookup_order"
-    snapshot = (
-        await client.get(f"/api/support/workspaces/{workspace}/overview")
-    ).json()
+    snapshot = (await client.get(f"/api/v1/workspaces/{workspace}/overview")).json()
     assert (
         next(o for o in snapshot["orders"] if o["reference"] == "ORD-1003")["status"]
         == "delivered"
@@ -104,7 +188,7 @@ async def test_tenant_isolation(support_context):
     owner, workspace, path, ticket = await prepared(support_context)
     other = await support_context.account()
     other_workspace = await create_workspace(other)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     assert (await other.get(prefix + "/overview")).status_code == 404
     assert (await other.get(path)).status_code == 404
     assert (
@@ -115,9 +199,7 @@ async def test_tenant_isolation(support_context):
     ).status_code == 404
     assert (await other.post(path + "/draft")).status_code == 404
     assert (
-        await owner.get(
-            f"/api/support/workspaces/{other_workspace}/tickets/{ticket['id']}"
-        )
+        await owner.get(f"/api/v1/workspaces/{other_workspace}/tickets/{ticket['id']}")
     ).status_code == 404
     assert (
         await other.delete(prefix + "/documents/" + ticket["sources"][0]["document_id"])
@@ -127,7 +209,7 @@ async def test_tenant_isolation(support_context):
 async def test_agent_permissions(support_context):
     owner, workspace, path, ticket = await prepared(support_context)
     agent = await support_context.account("agent@example.com")
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     assert (
         await owner.post(
             prefix + "/members", json={"email": "agent@example.com", "role": "agent"}
@@ -158,7 +240,7 @@ async def test_stale_evidence_and_revision(support_context):
         )
     ).status_code == 409
     await client.delete(
-        f"/api/support/workspaces/{workspace}/documents/"
+        f"/api/v1/workspaces/{workspace}/documents/"
         + ticket["sources"][0]["document_id"]
     )
     assert (
@@ -191,9 +273,7 @@ async def test_rejection_and_feedback(support_context):
         assert (
             await client.post(path + "/feedback", json={"vote": vote})
         ).status_code == 200
-    snapshot = (
-        await client.get(f"/api/support/workspaces/{workspace}/overview")
-    ).json()
+    snapshot = (await client.get(f"/api/v1/workspaces/{workspace}/overview")).json()
     assert snapshot["metrics"]["feedback"] == {"1": 1}
     assert any(e["event"] == "review.rejected" for e in snapshot["audit"])
     assert (
@@ -205,7 +285,7 @@ async def test_rejection_and_feedback(support_context):
 async def test_document_queue_and_knowledge_history(support_context):
     client = await support_context.account()
     workspace = await create_workspace(client)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     response = await client.post(
         prefix + "/documents",
         files={
@@ -242,10 +322,10 @@ async def test_document_queue_and_knowledge_history(support_context):
 async def test_failed_document_retry_budget(support_context):
     client = await support_context.account()
     workspace = await create_workspace(client)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     response = await client.post(
         prefix + "/documents",
-        files={"file": ("broken.pdf", b"invalid", "application/pdf")},
+        files={"file": ("broken.pdf", b"%PDF-1.7\nbroken", "application/pdf")},
     )
     assert response.status_code == 202
     for attempt in range(1, 4):
@@ -262,7 +342,7 @@ async def test_customer_mismatch(support_context):
     client = await support_context.account()
     workspace = await create_workspace(client)
     await demo(support_context, client, workspace)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     ticket = (
         await client.post(
             prefix + "/tickets",
@@ -274,7 +354,9 @@ async def test_customer_mismatch(support_context):
             },
         )
     ).json()
-    response = await client.post(prefix + f"/tickets/{ticket['id']}/draft")
+    response = await prepare_draft(
+        support_context, client, prefix + f"/tickets/{ticket['id']}"
+    )
     assert response.status_code == 200, response.text
     assert response.json()["tool_calls"][0]["result"] == {"found": False}
     assert response.json()["proposed_action"]["kind"] == "escalate"
@@ -283,7 +365,7 @@ async def test_customer_mismatch(support_context):
 async def test_csrf_validation_and_seed_idempotency(support_context):
     client = await support_context.account()
     workspace = await create_workspace(client)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     token = client.headers.pop("X-CSRF-Token")
     assert (await client.post(prefix + "/demo")).status_code == 403
     client.headers["X-CSRF-Token"] = token
@@ -314,13 +396,13 @@ async def test_rate_budget_and_workflow_failure(support_context):
     for _ in range(10):
         assert (
             await client.post(
-                f"/api/support/workspaces/{workspace}/ask",
+                f"/api/v1/workspaces/{workspace}/ask",
                 json={"question": "Any policy?"},
             )
         ).status_code == 200
     assert (
         await client.post(
-            f"/api/support/workspaces/{workspace}/ask", json={"question": "Any policy?"}
+            f"/api/v1/workspaces/{workspace}/ask", json={"question": "Any policy?"}
         )
     ).status_code == 429
     client2, _, path2, _ = await prepared(support_context)
@@ -328,7 +410,7 @@ async def test_rate_budget_and_workflow_failure(support_context):
         "resolveai.workflow.SupportEngine.graph",
         new=AsyncMock(side_effect=RuntimeError("provider down")),
     ):
-        assert (await client2.post(path2 + "/draft")).status_code == 503
+        assert (await prepare_draft(support_context, client2, path2)).status_code == 200
     ticket = (await client2.get(path2)).json()
     assert (
         ticket["status"] == "open"
@@ -351,7 +433,7 @@ def test_triage_evaluation_set():
 
 async def test_two_tickets_cannot_refund_same_order_twice(support_context):
     client, workspace, path, ticket = await prepared(support_context)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     other = (
         await client.post(
             prefix + "/tickets",
@@ -364,7 +446,7 @@ async def test_two_tickets_cannot_refund_same_order_twice(support_context):
         )
     ).json()
     other_path = prefix + f"/tickets/{other['id']}"
-    draft = await client.post(other_path + "/draft")
+    draft = await prepare_draft(support_context, client, other_path)
     assert draft.status_code == 200
     results = await asyncio.gather(
         client.post(path + "/review", json=review_body(ticket)),
@@ -382,7 +464,7 @@ async def test_worker_reclaims_interrupted_document(support_context):
 
     client = await support_context.account()
     workspace = await create_workspace(client)
-    prefix = f"/api/support/workspaces/{workspace}"
+    prefix = f"/api/v1/workspaces/{workspace}"
     upload = await client.post(
         prefix + "/documents",
         files={"file": ("policy.md", b"Shipping takes five days.", "text/markdown")},
@@ -395,7 +477,7 @@ async def test_worker_reclaims_interrupted_document(support_context):
             1,
             str(uuid4()),
         )
-        document.updated_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+        document.updated_at = datetime.now(timezone.utc) - timedelta(minutes=13)
         await db.commit()
     assert await process_once(support_context.factory)
     document = (await client.get(prefix + "/overview")).json()["documents"][0]
@@ -407,15 +489,12 @@ async def test_worker_reclaims_interrupted_document(support_context):
 
 async def test_local_mode_never_calls_paid_providers(support_context):
     with patch(
-        "resolveai.workflow.genai.Client",
+        "ai.gemini.genai.Client",
         side_effect=AssertionError("Unexpected model call"),
-    ), patch(
-        "resolveai.knowledge._pinecone_index",
-        side_effect=AssertionError("Unexpected vector call"),
     ):
         client, workspace, _, _ = await prepared(support_context)
         result = await client.post(
-            f"/api/support/workspaces/{workspace}/ask",
+            f"/api/v1/workspaces/{workspace}/ask",
             json={"question": "What is our refund policy?"},
         )
         assert result.status_code == 200
@@ -425,14 +504,18 @@ async def test_live_mode_requires_configuration(support_context, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     client = await support_context.account()
     response = await client.post(
-        "/api/support/workspaces", json={"name": "Live workspace", "ai_mode": "gemini"}
+        "/api/v1/workspaces", json={"name": "Live workspace", "ai_mode": "gemini"}
     )
-    assert response.status_code == 503 and "GEMINI_API_KEY" in response.json()["detail"]
-    assert (await client.get("/api/support/workspaces")).json() == []
+    assert (
+        response.status_code == 503
+        and "GEMINI_API_KEY" in response.json()["error"]["message"]
+    )
+    assert (await client.get("/api/v1/workspaces")).json() == []
 
 
 async def test_invalid_model_citations_are_rejected():
     from fastapi import HTTPException
+
     from resolveai.schemas import Draft
     from resolveai.workflow import SupportEngine
 
@@ -450,36 +533,38 @@ async def test_invalid_model_citations_are_rejected():
         raise AssertionError("Unsupported citations must not be returned")
 
 
-async def test_semantic_retrieval_uses_workspace_namespace_and_ready_document_filter(
+async def test_pgvector_retrieval_filters_workspace_status_and_similarity(
     support_context,
 ):
-    from types import SimpleNamespace
-    from unittest.mock import Mock
-
+    from database.models import BusinessChunk, BusinessDocument
     from resolveai.knowledge import retrieve
 
     client = await support_context.account()
     workspace = await create_workspace(client)
     snapshot = await demo(support_context, client, workspace)
-    doc_id = snapshot["documents"][0]["id"]
-    search = Mock(
-        return_value=SimpleNamespace(
-            matches=[
-                {"document_id": doc_id, "chunk_index": 0},
-                {"document_id": str(uuid4()), "chunk_index": 0},
-            ]
-        )
-    )
+    wanted = snapshot["documents"][0]["id"]
+    other = await create_workspace(client)
+    await demo(support_context, client, other)
+    query_vector = [1.0] + [0.0] * 767
     async with support_context.factory() as db:
+        for chunk in (await db.scalars(select(BusinessChunk))).all():
+            chunk.embedding = (
+                query_vector
+                if str(chunk.document_id) == wanted or str(chunk.workspace_id) == other
+                else [-1.0] + [0.0] * 767
+            )
+        await db.commit()
         with patch(
-            "resolveai.knowledge._pinecone_index",
-            return_value=SimpleNamespace(documents=SimpleNamespace(search=search)),
-        ):
+            "resolveai.knowledge.embed_texts", AsyncMock(return_value=[query_vector])
+        ) as embed:
             result = await retrieve(db, UUID(workspace), "refund", "gemini")
-    assert len(result) == 1 and result[0]["document_id"] == doc_id
-    assert search.call_args.kwargs[
-        "namespace"
-    ] == "support-workspace-" + workspace.replace("-", "")
-    assert set(search.call_args.kwargs["filter"]["document_id"]["$in"]) == {
-        doc["id"] for doc in snapshot["documents"]
-    }
+            assert result and all(x["document_id"] == wanted for x in result)
+            assert all(x["score"] >= 0.35 for x in result)
+            embed.assert_awaited_once()
+        document = await db.get(BusinessDocument, wanted)
+        document.status = "deleting"
+        await db.commit()
+        with patch(
+            "resolveai.knowledge.embed_texts", AsyncMock(return_value=[query_vector])
+        ):
+            assert await retrieve(db, UUID(workspace), "refund", "gemini") == []

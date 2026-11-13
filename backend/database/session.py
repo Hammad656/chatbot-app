@@ -3,12 +3,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.engine import URL
+
+from database import tenant as tenant  # register transaction context restoration
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 

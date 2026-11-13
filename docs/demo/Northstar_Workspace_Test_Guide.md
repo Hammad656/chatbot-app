@@ -10,16 +10,16 @@ The keyboard, lamp, and sleeve prices deliberately match the application's built
 
 ## 2. Upload and first test
 
-1. Open http://localhost:3000/resolve and sign in.
-2. Create a fresh workspace named Northstar Workspace QA. Choose Local demo for a no-provider-key test, or Gemini if your Gemini and integrated-embedding Pinecone configuration is already working. Workspace mode is fixed at creation.
+1. Open http://localhost:3000 and sign in.
+2. Create a fresh workspace named Northstar Workspace QA. Choose Local demo for a no-provider-key test, or Gemini if your Gemini and pgvector configuration is already working. Workspace mode is fixed at creation.
 3. Open Knowledge base and upload ONE version of Northstar_Workspace_Company_Knowledge_Base: PDF, DOCX, or Markdown. The contents are the same. Uploading all three creates repeated evidence and unnecessary indexing work.
 4. Wait for the document status to become Ready. The default inline worker processes the upload in the background. If it shows Failed, inspect the visible error before retrying. Gemini mode can fail on provider credentials, index configuration, network access, or quota.
 5. Ask one question, expand its sources, and compare the cited source text with this guide. For a clean knowledge test, do not load unrelated documents or generic sample policies into this workspace.
 6. Start with K01, K04, K11, K17, K21, K29, K32, K36, K41, and K45. Run the larger checklist only if useful; it is not necessary to spend model requests on every row.
 
-Local demo uses keyword-ranked excerpts and rule-based ticket drafts. It does not use Gemini or Pinecone and does not perform conversational reasoning or calculations for you. For a local-mode question, inspect whether the matching excerpts contain the correct facts. For a Gemini-mode question, also inspect the synthesized answer, arithmetic, caveats, and citations. Do not mark an honest local excerpt response wrong solely because it is not a conversational answer.
+Local demo uses keyword-ranked excerpts and rule-based ticket drafts. It does not call Gemini or store semantic vectors and does not perform conversational reasoning or calculations for you. For a local-mode question, inspect whether the matching excerpts contain the correct facts. For a Gemini-mode question, also inspect the synthesized answer, arithmetic, caveats, and citations. Do not mark an honest local excerpt response wrong solely because it is not a conversational answer.
 
-The existing application permits ten combined knowledge-answer and ticket-preparation requests per workspace per minute. Space out requests; a rate-limit response is not a retrieval failure. Gemini mode may use paid or quota-limited model and embedding requests depending on your provider account. This pack does not require a new external service or extra API integration.
+The existing application permits ten combined knowledge-answer and ticket-preparation requests per workspace per minute. Space out requests; a rate-limit response is not a retrieval failure. Gemini mode may use paid or quota-limited Gemini model and embedding requests depending on your provider account. This pack does not require a new external service or extra API integration.
 
 ## 3. Forty-five knowledge checks
 
@@ -258,7 +258,7 @@ F04. Refund flow: open Request a refund for nora@example.com and ORD-1003 and pr
 
 F05. Reject instead of approve: before approving F04, reject its draft with a reason. Expected: the order stays delivered and no refund executes. A rejection can be inspected in review history. Regenerate a draft if you want to exercise later approval; a rejected proposal is not a successful refund.
 
-F06. Customer mismatch: create a new ticket using ORD-1001 but another synthetic customer email, such as outsider@northstar.example. Expected: lookup_order does not return Alex's order. A request for a refund cannot become eligible merely because a known reference appears in the text. Agents must not put unrelated private order data in the reply.
+F06. Customer mismatch: create a new ticket using ORD-1001 but another synthetic customer email, such as outsider@example.com. Expected: lookup_order does not return Alex's order. A request for a refund cannot become eligible merely because a known reference appears in the text. Agents must not put unrelated private order data in the reply.
 
 F07. Missing order and safe escalation: create a refund ticket referencing ORD-9999, which you have not created in the workspace. Expected: lookup_order returns not found; the mock workflow proposes escalation rather than a refund. A catalog price or refund paragraph cannot substitute for an actual matching order.
 

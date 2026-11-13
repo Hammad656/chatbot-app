@@ -1,175 +1,77 @@
-# Morrow backend
+# ResolveAI backend
 
-FastAPI service for Morrow. PostgreSQL stores user accounts, conversations, and
-messages. Passwords are Argon2-hashed; authenticated sessions use HTTP-only
-cookies with CSRF protection. Gemini requests run on the server, so the API key
-is never exposed to the browser.
+Python 3.12, FastAPI, async SQLAlchemy, PostgreSQL with pgvector and a Redis/arq
+worker. All active product routes use `/api/v1`. There is one company knowledge
+pipeline; the old `/api/cv`, `/api/chats`, and `/api/chat/...` APIs are removed.
+Historical personal-chat tables remain archived for data preservation and are
+not granted to the new runtime roles.
 
-The `database/` directory contains SQLAlchemy models and Alembic migrations.
-PostgreSQL itself stores database files in its own server-managed data directory.
+Use the [root setup instructions](../README.md) for Docker. In the browser,
+OpenAPI documentation is available at **http://localhost:3000/api/v1/docs**.
+`/health` is a private-container liveness endpoint; `/api/v1/health/ready` checks
+the migrated schema, vector extension, and runtime role.
 
-## Requirements
+## Configuration
 
-- Python 3.11 or later (tested with Python 3.12)
-- PostgreSQL with the `chatbot-db` database created
+Keep your existing private `.env`. Required settings are PostgreSQL credentials
+and `JWT_SECRET_KEY`. Gemini mode also requires `GEMINI_API_KEY`; `GEMINI_MODEL`
+defaults to `gemini-flash-latest`. New workspaces use `EMBEDDING_MODEL`, default
+`gemini-embedding-001`. Vector dimension 768 is fixed in the migration.
+`RAG_MIN_SIMILARITY` defaults to 0.35. Pinecone settings are unused.
 
-## Configure
+Compose supplies `REDIS_URL`, `UPLOAD_DIR`, internal database host and runtime
+roles. `resolveai_app` handles API requests, and `resolveai_worker` handles jobs;
+neither owns business tables or bypasses RLS. Migrations run with the original
+owner credentials. Set distinct `RESOLVEAI_APP_PASSWORD` and
+`RESOLVEAI_WORKER_PASSWORD` for a non-local deployment; local Compose can reuse
+the existing database password. Migration/worker credentials are removed from
+the API process environment after bootstrap.
 
-From the project root, copy the example file only if you do not already have a
-private `backend/.env`:
-
-```powershell
-Copy-Item backend\.env.example backend\.env
-```
-
-In `backend/.env`, set:
-
-- `GEMINI_API_KEY` to your Google Gemini API key.
-- Optionally set `GEMINI_MODEL` (defaults to `gemini-flash-latest`) and
-  `GEMINI_TIMEOUT_SECONDS` (defaults to `45`).
-  If Google rejects that model with 404, or returns a temporary 503, the backend
-  lists models using the same API key and retries generation at most once with
-  a different advertised stable Flash text model supporting `generateContent`.
-  It prefers the Flash alias for 404 and the Flash Lite alias for 503; it never
-  silently switches to Pro, preview, image, audio, or embedding models.
-  An existing `GEMINI_MODEL` in your private `.env` overrides the code default.
-- `PINECONE_API_KEY` to a Pinecone API key.
-- `PINECONE_INDEX_NAME` to the name of your Pinecone index (for example,
-  `blooming-peach`). The index must have an integrated embedding field named
-  `text`; the current Pinecone setup uses that field to embed CV passages and
-  search questions. The backend does not generate separate embeddings.
-  Replace the example API key with your real key; the literal `your-key` is only
-  a placeholder and cannot authenticate.
-- `POSTGRES_PASSWORD` to the password for the PostgreSQL user in `POSTGRES_USER`.
-- `JWT_SECRET_KEY` to a long, random value. Generate one with:
-
-  ```powershell
-  py -c "import secrets; print(secrets.token_urlsafe(48))"
-  ```
-
-The local database defaults are `localhost:5432`, user `postgres`, and database
-`chatbot-db`. Change `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, or
-`POSTGRES_DB` if your PostgreSQL setup is different. Keep `.env` private and
-never commit or share it. For production, set `COOKIE_SECURE=true` and update
-`CORS_ORIGINS` to the exact HTTPS frontend origin.
-
-## Install and migrate
-
-```powershell
-cd backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-alembic upgrade head
-```
-
-The migrations create users, conversations, messages, revocable login sessions,
-and CV indexing metadata. Deleting a user deletes their database records. Login
-sessions expire after seven days. Run `alembic upgrade head` again whenever the
-database schema changes.
-
-## Diagnose Gemini configuration
-
-A `404 NOT_FOUND` mentioning `models/gemini-1.5-flash` means that the model
-selected by the running process is unavailable or does not support
-`generateContent`. Changing only the API key does not change `GEMINI_MODEL`.
-Replace that stale setting with a model available to your Google AI Studio
-project. The default alias in `.env.example` follows the official Python SDK's
-Flash examples; availability still depends on the project and current service.
-
-From the backend directory, using the same virtual environment as Uvicorn:
-
-```powershell
-.\.venv\Scripts\python.exe check_gemini.py
-```
-
-This lists generation model names without printing the API key. Copy a suitable
-Flash text model name into `GEMINI_MODEL` in your existing private `.env`.
-To also make a small generation request (uses Gemini quota):
-
-```powershell
-.\.venv\Scripts\python.exe check_gemini.py --test
-```
-
-For ResolveAI, test the JSON response schema too. A successful plain-text
-generation does not prove structured outputs work:
-
-```powershell
-.\.venv\Scripts\python.exe check_gemini.py --structured
-```
-
-In Docker, run the check against the API container's actual settings:
-
-```powershell
-docker compose --env-file backend/.env exec api python check_gemini.py --structured
-```
-
-The structured check uses synthetic data and makes one generation request;
-it does not upload a CV, company document or customer record. Provider errors
-include a redacted diagnostic in server logs and CLI output. Public API errors
-identify HTTP 400 request rejection without exposing the raw provider message.
-
-An error saying `Unknown name "additional_properties"` at
-`generation_config.response_schema` comes from Pydantic's strict schema being
-sent through the SDK to an API that does not accept that field. ResolveAI
-removes that keyword from the provider schema while retaining strict Pydantic
-validation on generated answers. Pull the fix and rebuild the API image; the
-existing document and Pinecone passages do not need re-uploading.
-
-Stop and restart Uvicorn after changing `.env`; editing `.env` does not reliably
-restart a running backend. Existing exported environment variables take
-precedence over `.env`. If the model shown by the diagnostic or `/health` still
-looks wrong, check for an exported `GEMINI_MODEL` override or a backend process
-running from another checkout. The health check shows the configured model,
-but does not prove provider connectivity or quota availability.
-
-The chat API reports model/configuration failures as 503, Google quota/rate
-limits as 429, and other provider failures as 502. It does not retry quota or
-API-key errors across other models. Diagnostic output and public error messages
-do not include credential values or raw provider response bodies.
-
-A hydration warning involving `cz-shortcut-listen` on `<body>` is separate from
-a provider error. Browser extensions can inject that attribute before React
-hydrates. Test in a browser profile with extensions disabled; do not hide all
-hydration warnings to work around it.
-
-## CV retrieval-augmented chat
-
-After signing in, use **Upload CV** in the sidebar to upload a PDF or DOCX file
-(maximum 8 MB). The backend extracts selectable text, splits it into overlapping
-passages, and upserts those passages into the configured Pinecone index. Each
-account gets its own Pinecone namespace, and every search is additionally
-filtered to the account's current CV. To correct a mistaken upload, select
-**Replace CV** and upload the right PDF or DOCX; the new CV becomes active after
-it is indexed, and the previous CV is then removed. **Remove** deletes all
-indexed passages in that user's namespace.
-
-Chat is CV-only: without an uploaded CV, the assistant asks the user to upload
-one. With a CV, every question searches only the current document in that user's
-namespace. The backend retrieves up to ten passages without a fixed similarity
-cutoff, since useful matches can score differently for short CVs and follow-up
-questions. Recent conversation turns help resolve follow-ups and improve the
-search query; the model is explicitly told they are not evidence. Only retrieved
-CV excerpts support facts about the user, and the model cites their section and
-excerpt labels. General questions unrelated to the CV are out of scope. Scanned
-PDFs require OCR before upload; OCR is not included.
-
-The original file is not retained. Extracted passages are stored by Pinecone,
-and relevant passages are sent to Gemini during CV-aware chat. Keep the Gemini
-and Pinecone API keys private in `backend/.env`; never put them in the frontend.
-
-## Run
+For standalone development, install `requirements-dev.txt`, use a pgvector-
+enabled PostgreSQL server and Redis, apply Alembic migrations as the owner,
+then run the API with runtime-role credentials. Run the worker separately:
 
 ```powershell
 uvicorn main:app --reload
+arq resolveai.jobs.WorkerSettings
 ```
 
-The API runs at `http://localhost:8000`; interactive API documentation is
-available at `http://localhost:8000/docs`. `GET /health` reports whether AI,
-database, and CV RAG settings are present. Account endpoints are under `/api/auth`, chats
-are under `/api/chats`, and `POST /api/chat/{conversation_id}` saves a message
-and its AI response to that user's conversation.
+Those commands belong in separate terminals only for standalone development.
+Docker Compose runs both processes for you. Do not combine an inline worker
+with the dedicated Docker worker; Compose sets `RESOLVEAI_INLINE_WORKER=false`.
 
-## ResolveAI support workspace
+## AI diagnostics
 
-The support web MVP is available at `/resolve`. Read the [implementation and learning guide](../docs/RESOLVEAI.md) for setup, document workers, tenant roles, LangGraph/tools, approval guarantees, testing and Docker. Run `alembic upgrade head` after installing the updated requirements. Existing CV endpoints remain available.
+From the project root:
+
+```powershell
+docker compose --env-file backend/.env exec api python check_gemini.py --structured --embeddings
+docker compose --env-file backend/.env logs --tail 80 api worker
+```
+
+The checks use synthetic data, consume provider quota, and do not send an
+uploaded company document. Errors include a bounded key-redacted provider
+diagnostic in server logs. Model listing alone does not establish generation or
+embedding access. Updating `.env` requires container recreation via Compose.
+
+The shared AI boundary strips Gemini's unsupported `additionalProperties`
+schema field while preserving strict Pydantic validation on returned output.
+Invalid structured output gets one repair request; unauthorized fields and
+unsupported citations remain blocked.
+
+## Verification
+
+Use a development/CI database with the vector extension and a role able to
+create disposable test schemas:
+
+```powershell
+python -m alembic upgrade head
+python -m alembic check
+python -m pytest -q
+```
+
+Integration tests use separate random schemas, explicit schema translation,
+and real PostgreSQL/pgvector. They cover company chat threads, tenant-scoped
+retrieval, non-owner RLS, queue preparation, authorization, approval and
+idempotent mock actions. Provider transport tests use the real Gemini SDK with
+an in-memory HTTP transport. They do not spend provider credits.

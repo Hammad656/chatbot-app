@@ -1,6 +1,6 @@
 services:
   database:
-    image: postgres:17
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in backend/.env}
@@ -19,19 +19,31 @@ services:
     environment:
       POSTGRES_HOST: database
       POSTGRES_PORT: "5432"
-      RESOLVEAI_INLINE_WORKER: "true"
+      POSTGRES_USER: resolveai_app
+      POSTGRES_PASSWORD: ${RESOLVEAI_APP_PASSWORD:-${POSTGRES_PASSWORD}}
+      MIGRATION_POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      MIGRATION_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      RESOLVEAI_WORKER_PASSWORD: ${RESOLVEAI_WORKER_PASSWORD:-${POSTGRES_PASSWORD}}
+      RESOLVEAI_REQUIRE_RLS: "true"
+      RESOLVEAI_INLINE_WORKER: "false"
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /var/lib/resolveai/uploads
+    volumes:
+      - resolveai_uploads:/var/lib/resolveai/uploads
     depends_on:
       database:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+      redis:
+        condition: service_healthy
+    expose:
+      - "8000"
     healthcheck:
       test:
         [
           CMD,
           python,
           -c,
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')",
         ]
       interval: 10s
       timeout: 5s
@@ -40,11 +52,42 @@ services:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        API_INTERNAL_URL: http://api:8000
     depends_on:
       api:
         condition: service_healthy
     ports:
       - "3000:3000"
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - resolveai_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: resolveai_worker
+      POSTGRES_PASSWORD: ${RESOLVEAI_WORKER_PASSWORD:-${POSTGRES_PASSWORD}}
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /var/lib/resolveai/uploads
+      RESOLVEAI_INLINE_WORKER: "false"
+    command: ["arq", "resolveai.jobs.WorkerSettings"]
+    volumes:
+      - resolveai_uploads:/var/lib/resolveai/uploads
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 volumes:
   resolveai_database:
+  resolveai_uploads:
+  resolveai_redis:

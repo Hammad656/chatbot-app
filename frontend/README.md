@@ -1,41 +1,28 @@
-# Morrow frontend
+# ResolveAI frontend
 
-Responsive Next.js chat interface for the Morrow AI assistant, with email and
-password signup/login. Authenticated conversations are loaded from PostgreSQL
-through the FastAPI backend and are available across browsers after login.
+The Next.js app serves the company dashboard at `/`. `/resolve` redirects home;
+there is no personal CV application. Sign in, choose a workspace, upload a
+company document in **Knowledge base**, and start or resume a cited conversation.
 
-## Run locally
+The typed API helper sends relative `/api/v1/...` requests. Next.js rewrites
+them to `API_INTERNAL_URL` on the server, default `http://127.0.0.1:8000` for
+standalone development. Compose builds it with `http://api:8000`. Browser code
+never needs a separate API origin or provider credentials. The previous
+`NEXT_PUBLIC_API_URL` setting is no longer used.
 
-1. Configure PostgreSQL, run the Alembic migration, and start the
-   [FastAPI backend](../backend/README.md).
-2. From this directory, configure the backend URL and start Next.js:
-
-   ```powershell
-   Copy-Item .env.example .env.local
-   npm install
-   npm run dev
-   ```
-
-3. Open [http://localhost:3000](http://localhost:3000), create an account, and
-   start a conversation.
-
-   After signing in, use **Upload CV** in the sidebar to index a PDF or DOCX for
-   CV-aware chat. Pinecone stores the extracted passages; only relevant passages
-   are sent to Gemini with a question. Use **Remove** to delete the indexed CV data.
-
-The browser calls the backend at `NEXT_PUBLIC_API_URL` (default:
-`http://localhost:8000`). The Gemini and Pinecone keys, PostgreSQL password,
-and session signing secret belong in `backend/.env` only. Authentication uses
-secure, HTTP-only session cookies; chat history is not stored in browser local
-storage.
-
-## Other commands
+Use the [root Docker instructions](../README.md) to run the whole project.
+For frontend-only development with a separately running backend:
 
 ```powershell
-npm run lint
-npm run build
+npm ci
+npm run dev
 ```
 
-## ResolveAI
+Check changes using `npm run lint` and `npm run build`. The Knowledge base view
+polls queued documents. Ticket drafts return immediately with a processing
+state, and the view refreshes when the separate worker completes preparation.
+Company chat history is persisted per workspace and conversation. Switching
+workspaces clears the active conversation; stale network responses are ignored.
 
-Open `/resolve` for the support dashboard. It uses the existing login and backend URL. Create a Local demo workspace and load demo data to try the workflow without provider keys. See [the learning guide](../docs/RESOLVEAI.md) for the architecture and startup steps.
+The UI retains the dark glass theme, responsive layout, motion preferences,
+sources, mock orders, reviewer controls, audit history and team membership.

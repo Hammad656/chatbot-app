@@ -13,11 +13,14 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from database.models import (
+    BusinessChunk,
     BusinessDocument,
     DemoOrder,
     KnowledgeAnswer,
+    KnowledgeThread,
     SupportAudit,
     SupportDecision,
     SupportFeedback,
@@ -29,7 +32,9 @@ from database.models import (
     WorkspaceMember,
 )
 from database.session import get_db
-from rag import MAX_UPLOAD_BYTES, pinecone_is_configured, safe_filename
+from database.tenant import set_tenant
+from resolveai.documents import MAX_UPLOAD_BYTES, safe_filename
+from resolveai.jobs import enqueue_document, enqueue_draft
 from resolveai.knowledge import retrieve
 from resolveai.schemas import (
     Feedback,
@@ -40,7 +45,8 @@ from resolveai.schemas import (
     TicketCreate,
     WorkspaceCreate,
 )
-from resolveai.workflow import PROMPT_VERSION, QUEUES, SupportEngine
+from resolveai.storage import save_upload
+from resolveai.workflow import PROMPT_VERSION, SupportEngine
 
 
 def fields(obj, *names):
@@ -91,6 +97,7 @@ def audit(db, workspace_id, actor_id, event, ticket_id=None, **details):
 
 
 async def member(db, workspace_id, user_id, admin=False):
+    await set_tenant(db, workspace_id, user_id)
     row = (
         await db.execute(
             select(Workspace, WorkspaceMember.role)
@@ -221,7 +228,7 @@ async def reserve_run(db, workspace, ticket_id=None):
 
 
 def build_router(current_user, csrf, generate, configured_model, map_error):
-    router = APIRouter(prefix="/api/support", tags=["ResolveAI"])
+    router = APIRouter(prefix="/api/v1", tags=["ResolveAI"])
 
     def engine(mode):
         return SupportEngine(mode, generate, configured_model, map_error)
@@ -249,12 +256,10 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         user: User = Depends(current_user),
         db: AsyncSession = Depends(get_db),
     ):
-        if body.ai_mode == "gemini" and (
-            not os.getenv("GEMINI_API_KEY") or not pinecone_is_configured()
-        ):
+        if body.ai_mode == "gemini" and (not os.getenv("GEMINI_API_KEY")):
             raise HTTPException(
                 503,
-                "Gemini workspaces require GEMINI_API_KEY, PINECONE_API_KEY and PINECONE_INDEX_NAME. Local demo mode needs no provider keys.",
+                "Gemini workspaces require GEMINI_API_KEY. Company embeddings are stored in PostgreSQL/pgvector. Local demo mode needs no provider keys.",
             )
         # Per-account limit is serialized by the user row.
         await db.scalar(select(User).where(User.id == user.id).with_for_update())
@@ -267,9 +272,15 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             raise HTTPException(
                 409, "This account already owns the maximum of ten workspaces."
             )
-        workspace = Workspace(name=body.name, owner_id=user.id, ai_mode=body.ai_mode)
+        workspace = Workspace(
+            name=body.name,
+            owner_id=user.id,
+            ai_mode=body.ai_mode,
+            embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
+        )
         db.add(workspace)
         await db.flush()
+        await set_tenant(db, workspace.id, user.id)
         db.add(
             WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin")
         )
@@ -358,6 +369,14 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                 .limit(20)
             )
         ).all()
+        threads = (
+            await db.scalars(
+                select(KnowledgeThread)
+                .where(KnowledgeThread.workspace_id == workspace_id)
+                .order_by(KnowledgeThread.created_at.desc())
+                .limit(50)
+            )
+        ).all()
         return {
             "workspace": {**fields(workspace, "id", "name", "ai_mode"), "role": role},
             "tickets": [ticket_summary(t) for t in tickets],
@@ -389,9 +408,19 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                 else []
             ),
             "answers": [
-                fields(a, "id", "question", "answer", "sources", "mode", "created_at")
+                fields(
+                    a,
+                    "id",
+                    "thread_id",
+                    "question",
+                    "answer",
+                    "sources",
+                    "mode",
+                    "created_at",
+                )
                 for a in answers
             ],
+            "threads": [fields(t, "id", "title", "created_at") for t in threads],
             "metrics": {
                 "tickets": sum(counts.values()),
                 "statuses": counts,
@@ -464,7 +493,11 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             raise HTTPException(422, "Upload PDF, DOCX, UTF-8 TXT or Markdown.")
         data = await file.read(MAX_UPLOAD_BYTES + 1)
         if not data or len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(422, "Upload a nonempty file up to 8 MB.")
+            raise HTTPException(422, "Upload a nonempty file up to 20 MB.")
+        if filename.lower().endswith(".pdf") and not data.startswith(b"%PDF-"):
+            raise HTTPException(422, "The file does not contain a PDF signature.")
+        if filename.lower().endswith(".docx") and not data.startswith(b"PK"):
+            raise HTTPException(422, "The file does not contain a DOCX signature.")
         await db.scalar(
             select(Workspace).where(Workspace.id == workspace_id).with_for_update()
         )
@@ -491,7 +524,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             workspace_id=workspace_id,
             filename=filename,
             content_hash=digest,
-            content=data,
+            storage_key=await run_in_threadpool(save_upload, data),
         )
         db.add(document)
         await db.flush()
@@ -500,6 +533,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         )
         await db.commit()
         await db.refresh(document)
+        await enqueue_document(workspace_id, document.id)
         return document_view(document)
 
     @router.post(
@@ -526,7 +560,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         if (
             document.status != "failed"
             or document.attempts >= 3
-            or document.content is None
+            or (document.content is None and document.storage_key is None)
         ):
             raise HTTPException(
                 409,
@@ -537,6 +571,59 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             db, workspace_id, user.id, "document.retried", document_id=str(document_id)
         )
         await db.commit()
+        await enqueue_document(workspace_id, document_id)
+        return document_view(document)
+
+    @router.post(
+        "/workspaces/{workspace_id}/documents/{document_id}/reindex",
+        dependencies=[Depends(csrf)],
+    )
+    async def reindex_document(
+        workspace_id: UUID,
+        document_id: UUID,
+        user: User = Depends(current_user),
+        db: AsyncSession = Depends(get_db),
+    ):
+        await member(db, workspace_id, user.id, admin=True)
+        document = await db.scalar(
+            select(BusinessDocument)
+            .where(
+                BusinessDocument.id == document_id,
+                BusinessDocument.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        if document is None:
+            raise HTTPException(404, "Document not found.")
+        if document.status in ("processing", "queued", "deleting"):
+            raise HTTPException(409, "This document already has a pending job.")
+        existing = await db.scalar(
+            select(BusinessChunk.id)
+            .where(
+                BusinessChunk.document_id == document_id,
+                BusinessChunk.workspace_id == workspace_id,
+            )
+            .limit(1)
+        )
+        if not (document.storage_key or document.content or existing):
+            raise HTTPException(
+                409, "Upload the original document again; no reusable source remains."
+            )
+        document.status, document.attempts, document.error, document.lease_id = (
+            "queued",
+            0,
+            None,
+            None,
+        )
+        audit(
+            db,
+            workspace_id,
+            user.id,
+            "document.reindex_queued",
+            document_id=str(document_id),
+        )
+        await db.commit()
+        await enqueue_document(workspace_id, document_id)
         return document_view(document)
 
     @router.delete(
@@ -619,6 +706,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
     @router.post(
         "/workspaces/{workspace_id}/tickets/{ticket_id}/draft",
         dependencies=[Depends(csrf)],
+        status_code=202,
     )
     async def draft_ticket(
         workspace_id: UUID,
@@ -634,7 +722,8 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             active = await db.scalar(
                 select(SupportRun)
                 .where(
-                    SupportRun.ticket_id == ticket.id, SupportRun.status == "running"
+                    SupportRun.ticket_id == ticket.id,
+                    SupportRun.status.in_(["running", "queued"]),
                 )
                 .order_by(SupportRun.created_at.desc())
                 .limit(1)
@@ -652,76 +741,24 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         ticket.status, ticket.last_error = "processing", None
         ticket.revision += 1
         revision = ticket.revision
-        initial = {
-            "subject": ticket.subject,
-            "message": ticket.description,
-            "customer_email": ticket.customer_email,
-            "order_reference": ticket.order_reference,
+        run.status = "queued"
+        run.job_context = {
+            "actor_id": str(user.id),
+            "revision": revision,
+            "request_id": db.info.get("request_id"),
+            "tries": 0,
         }
-        run_id = run.id
-        await db.commit()
-        service = engine(workspace.ai_mode)
-        started = time.monotonic()
-        failure = None
-        try:
-            async with asyncio.timeout(100):
-                result = await service.graph(db, workspace_id, initial)
-        except HTTPException as error:
-            failure = error
-        except TimeoutError:
-            failure = HTTPException(
-                503, "The workflow timed out. Retry or handle this ticket manually."
-            )
-        except Exception:
-            failure = HTTPException(
-                503,
-                "The workflow could not access its tools or knowledge provider. Check configuration and retry.",
-            )
-        ticket = await ticket_in_workspace(db, workspace_id, ticket_id, lock=True)
-        run = await db.get(SupportRun, run_id)
-        if ticket.revision != revision or ticket.status != "processing":
-            raise HTTPException(409, "This draft was superseded by another change.")
-        run.duration_ms = round((time.monotonic() - started) * 1000)
-        run.tokens, run.model = service.tokens, service.model
-        run.completed_at = datetime.now(timezone.utc)
-        if failure:
-            run.status, run.error = "failed", str(failure.detail)[:500]
-            ticket.status, ticket.last_error = "open", str(failure.detail)[:500]
-            audit(
-                db,
-                workspace_id,
-                user.id,
-                "workflow.failed",
-                ticket_id,
-                run_id=str(run.id),
-                status=failure.status_code,
-            )
-            await db.commit()
-            raise failure
-        run.status = "completed"
-        ticket.category = result["triage"]["category"]
-        ticket.priority = result["triage"]["priority"]
-        ticket.queue = QUEUES[ticket.category]
-        ticket.status = "awaiting_approval"
-        ticket.draft, ticket.proposed_action = (
-            result["draft"],
-            result["proposed_action"],
+        ticket.draft, ticket.sources, ticket.tool_calls, ticket.proposed_action = (
+            None,
+            [],
+            [],
+            {},
         )
-        ticket.sources, ticket.tool_calls = result["sources"], result["tool_calls"]
         audit(
-            db,
-            workspace_id,
-            user.id,
-            "workflow.completed",
-            ticket_id,
-            run_id=str(run.id),
-            action=ticket.proposed_action["kind"],
-            category=ticket.category,
-            model=run.model,
-            tokens=run.tokens,
-            duration_ms=run.duration_ms,
+            db, workspace_id, user.id, "workflow.queued", ticket_id, run_id=str(run.id)
         )
         await db.commit()
+        await enqueue_draft(workspace_id, run.id)
         await db.refresh(ticket)
         return await detail(db, ticket)
 
@@ -736,8 +773,15 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         user: User = Depends(current_user),
         db: AsyncSession = Depends(get_db),
     ):
-        await member(db, workspace_id, user.id, admin=True)
+        _, role = await member(db, workspace_id, user.id)
         ticket = await ticket_in_workspace(db, workspace_id, ticket_id, lock=True)
+        if (
+            ticket.proposed_action.get("kind") in ("refund", "replacement")
+            and role != "admin"
+        ):
+            raise HTTPException(
+                403, "An administrator must review this sensitive action."
+            )
         digest = hashlib.sha256(
             json.dumps(
                 body.model_dump(mode="json", exclude={"request_id"}), sort_keys=True
@@ -911,6 +955,47 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         await db.commit()
         return {"saved": True}
 
+    @router.get("/workspaces/{workspace_id}/threads/{thread_id}")
+    async def thread_messages(
+        workspace_id: UUID,
+        thread_id: UUID,
+        user: User = Depends(current_user),
+        db: AsyncSession = Depends(get_db),
+    ):
+        await member(db, workspace_id, user.id)
+        thread = await db.scalar(
+            select(KnowledgeThread).where(
+                KnowledgeThread.id == thread_id,
+                KnowledgeThread.workspace_id == workspace_id,
+            )
+        )
+        if thread is None:
+            raise HTTPException(404, "Conversation not found.")
+        answers = (
+            await db.scalars(
+                select(KnowledgeAnswer)
+                .where(
+                    KnowledgeAnswer.thread_id == thread_id,
+                    KnowledgeAnswer.workspace_id == workspace_id,
+                )
+                .order_by(KnowledgeAnswer.created_at.desc(), KnowledgeAnswer.id.desc())
+                .limit(50)
+            )
+        ).all()
+        return [
+            fields(
+                a,
+                "id",
+                "thread_id",
+                "question",
+                "answer",
+                "sources",
+                "mode",
+                "created_at",
+            )
+            for a in reversed(answers)
+        ]
+
     @router.post("/workspaces/{workspace_id}/ask", dependencies=[Depends(csrf)])
     async def ask_knowledge(
         workspace_id: UUID,
@@ -919,23 +1004,70 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         db: AsyncSession = Depends(get_db),
     ):
         workspace, _ = await member(db, workspace_id, user.id)
+        thread = None
+        history = []
+        if body.thread_id:
+            thread = await db.scalar(
+                select(KnowledgeThread).where(
+                    KnowledgeThread.id == body.thread_id,
+                    KnowledgeThread.workspace_id == workspace_id,
+                )
+            )
+            if thread is None:
+                raise HTTPException(404, "Conversation not found.")
+            previous = (
+                await db.scalars(
+                    select(KnowledgeAnswer)
+                    .where(
+                        KnowledgeAnswer.thread_id == thread.id,
+                        KnowledgeAnswer.workspace_id == workspace_id,
+                    )
+                    .order_by(KnowledgeAnswer.created_at.desc())
+                    .limit(6)
+                )
+            ).all()
+            history = [
+                {"question": a.question[:400], "answer": a.answer[:1200]}
+                for a in reversed(previous)
+            ]
         run = await reserve_run(db, workspace)
         await db.commit()
+        run_id = run.id
         service = engine(workspace.ai_mode)
         started = time.monotonic()
         try:
-            async with asyncio.timeout(80):
+            async with asyncio.timeout(30):
                 sources = await retrieve(
-                    db, workspace_id, body.question, workspace.ai_mode
+                    db,
+                    workspace_id,
+                    body.question
+                    + (
+                        "\nConversation context: "
+                        + " ".join(h["question"] for h in history[-2:])
+                        if history
+                        else ""
+                    ),
+                    workspace.ai_mode,
                 )
-                answer = await service.answer(body.question, sources)
+                answer = await service.answer(body.question, sources, history)
         except Exception as error:
+            await db.rollback()
+            run = await db.get(SupportRun, run_id)
+            if run is None:
+                raise HTTPException(
+                    403,
+                    "Workspace access changed while answering. Reload and sign in again.",
+                ) from None
             run.status, run.error = (
                 "failed",
                 (
                     str(error.detail)[:500]
                     if isinstance(error, HTTPException)
-                    else "Knowledge request failed. Check provider configuration and retry."
+                    else (
+                        "Knowledge request timed out after 30 seconds. Retry or ask a person."
+                        if isinstance(error, TimeoutError)
+                        else "Knowledge request failed. Check provider configuration and retry."
+                    )
                 ),
             )
             run.model, run.tokens = service.model, service.tokens
@@ -945,8 +1077,15 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
             if isinstance(error, HTTPException):
                 raise
             raise HTTPException(503, run.error) from error
+        if thread is None:
+            thread = KnowledgeThread(
+                workspace_id=workspace_id, created_by=user.id, title=body.question[:100]
+            )
+            db.add(thread)
+            await db.flush()
         result = KnowledgeAnswer(
             workspace_id=workspace_id,
+            thread_id=thread.id,
             user_id=user.id,
             question=body.question,
             answer=answer,
@@ -968,7 +1107,14 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         await db.commit()
         await db.refresh(result)
         return fields(
-            result, "id", "question", "answer", "sources", "mode", "created_at"
+            result,
+            "id",
+            "thread_id",
+            "question",
+            "answer",
+            "sources",
+            "mode",
+            "created_at",
         )
 
     @router.post(

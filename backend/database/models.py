@@ -1,16 +1,18 @@
 import uuid
 from datetime import datetime, timezone
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
-    JSON,
+    Index,
     LargeBinary,
-    UniqueConstraint,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -142,7 +144,8 @@ class ChatMessage(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
-# ResolveAI tables are additive: existing CV conversations and accounts stay intact.
+# Retired personal-chat tables above are kept only to preserve historical data.
+# ResolveAI is the sole active application.
 class Workspace(Base):
     __tablename__ = "support_workspaces"
     __table_args__ = (
@@ -156,6 +159,11 @@ class Workspace(Base):
         ForeignKey("users.id", ondelete="RESTRICT")
     )
     ai_mode: Mapped[str] = mapped_column(String(16), default="local")
+    embedding_model: Mapped[str] = mapped_column(
+        String(100),
+        default="gemini-embedding-001",
+        server_default="gemini-embedding-001",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -196,6 +204,7 @@ class BusinessDocument(Base):
     filename: Mapped[str] = mapped_column(String(255))
     content_hash: Mapped[str] = mapped_column(String(64))
     content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
     chunk_count: Mapped[int] = mapped_column(default=0)
@@ -213,6 +222,12 @@ class BusinessChunk(Base):
     __tablename__ = "support_chunks"
     __table_args__ = (
         UniqueConstraint("document_id", "position", name="support_chunk_position"),
+        Index(
+            "support_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -224,6 +239,7 @@ class BusinessChunk(Base):
     position: Mapped[int] = mapped_column()
     section: Mapped[str] = mapped_column(String(160))
     text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
 
 
 class DemoOrder(Base):
@@ -326,6 +342,7 @@ class SupportRun(Base):
     mode: Mapped[str] = mapped_column(String(16))
     model: Mapped[str] = mapped_column(String(100))
     prompt_version: Mapped[str] = mapped_column(String(32), default="support-v1")
+    job_context: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     duration_ms: Mapped[int] = mapped_column(default=0)
     tokens: Mapped[int] = mapped_column(default=0)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -411,6 +428,21 @@ class SupportFeedback(Base):
     )
 
 
+class KnowledgeThread(Base):
+    __tablename__ = "support_knowledge_threads"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(100))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class KnowledgeAnswer(Base):
     __tablename__ = "support_answers"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -419,6 +451,15 @@ class KnowledgeAnswer(Base):
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "support_knowledge_threads.id",
+            name="support_answer_thread_fk",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
     )
     question: Mapped[str] = mapped_column(String(4000))
     answer: Mapped[str] = mapped_column(Text)

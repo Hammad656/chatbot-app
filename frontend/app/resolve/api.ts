@@ -1,6 +1,3 @@
-const BASE =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
-  "http://localhost:8000";
 export class APIError extends Error {
   constructor(
     public status: number,
@@ -21,20 +18,20 @@ export async function request<T>(
     headers.set("X-CSRF-Token", token);
   let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, {
+    response = await fetch(path, {
       ...options,
       headers,
       credentials: "include",
     });
   } catch {
     throw new Error(
-      "Cannot reach the backend. Start FastAPI and check NEXT_PUBLIC_API_URL.",
+      "Cannot reach ResolveAI. Check that the API service is running and try again.",
     );
   }
   const data =
     response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = data?.detail;
+    const detail = data?.error?.message ?? data?.detail;
     const message =
       typeof detail === "string"
         ? detail

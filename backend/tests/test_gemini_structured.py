@@ -11,8 +11,8 @@ from google import genai
 from google.genai import types
 from pydantic import ValidationError
 
+from ai.gemini import _gemini_http_error, _generate_gemini_content
 from check_gemini import check
-from main import _gemini_http_error, _generate_gemini_content
 from resolveai.schemas import Draft, StrictModel, Triage, gemini_response_schema
 from resolveai.workflow import SupportEngine
 
@@ -89,7 +89,7 @@ def sdk_provider(monkeypatch, answer):
         ),
     )
     factory = Mock(return_value=client)
-    monkeypatch.setattr("resolveai.workflow.genai.Client", factory)
+    monkeypatch.setattr("ai.gemini.genai.Client", factory)
     return SimpleNamespace(requests=requests, factory=factory)
 
 
@@ -205,11 +205,9 @@ async def test_failed_knowledge_run_retains_safe_provider_status(
     from database.models import SupportRun
 
     monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
-    monkeypatch.setenv("PINECONE_API_KEY", "synthetic-vector-key")
-    monkeypatch.setenv("PINECONE_INDEX_NAME", "synthetic-index")
     client = await support_context.account()
     response = await client.post(
-        "/api/support/workspaces",
+        "/api/v1/workspaces",
         json={
             "name": "Structured test",
             "ai_mode": "gemini",
@@ -224,7 +222,7 @@ async def test_failed_knowledge_run_retains_safe_provider_status(
 
     monkeypatch.setattr("resolveai.router.retrieve", fail)
     response = await client.post(
-        f"/api/support/workspaces/{workspace_id}/ask",
+        f"/api/v1/workspaces/{workspace_id}/ask",
         json={
             "question": "Order cancellation policy?",
         },

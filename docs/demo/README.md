@@ -13,11 +13,11 @@ Keep the evaluation guide separate; do **not** upload it:
 - [Test guide and expected answers](Northstar_Workspace_Test_Guide.md)
 - [PDF test guide](Northstar_Workspace_Test_Guide.pdf)
 
-The test guide contains 60 exercises, instructions for Local demo and Gemini modes, matching built-in synthetic order fixtures, and explicit limits of the current mock execution workflow. Local mode needs no provider keys; Gemini mode uses your configured Gemini/Pinecone accounts and their quotas or charges.
+The test guide contains 60 exercises, instructions for Local demo and Gemini modes, matching built-in synthetic order fixtures, and explicit limits of the current mock execution workflow. Local mode needs no provider keys; Gemini mode uses your configured Gemini account and their quotas or charges.
 
-The PDF and DOCX files are generated from the Markdown source. The pack fits the app's 8 MB upload, 80-page PDF, and 100,000-character extracted-text limits. Uploading a policy does not create live orders, send messages, process payments, or implement all of that policy as business logic.
+The PDF and DOCX files are generated from the Markdown source. The pack fits the app's 20 MB upload, 80-page PDF, and 500,000-character extracted-text limits. Uploading a policy does not create live orders, send messages, process payments, or implement all of that policy as business logic.
 
-The knowledge PDF has 25 pages and approximately 11,000 words. Its extracted text is 76,868 characters and the file is about 129 KB. The separate test-guide PDF has 13 pages. All three knowledge formats were checked with the app's actual parser; twelve representative questions per format found the expected evidence through the existing local retrieval function. Those 36 checks used an in-memory adapter for ready chunks, with no database writes or provider requests. They are evidence-retrieval checks, not a live Gemini evaluation.
+The knowledge PDF has 25 pages and approximately 11,000 words. The separate test-guide PDF has 12 pages. The company corpus is accepted by the application parser; the unified dashboard browser check uploads its actual PDF, waits for the Redis worker, and verifies cited answers and conversation history. The 60 exercises are a manual learning pack, not a claimed live-model quality benchmark.
 
 With `dev` checked out locally, get the pack using:
 
@@ -26,3 +26,5 @@ git pull --ff-only origin dev
 ```
 
 The files are in `docs\demo`. Uploading these documents requires no Docker rebuild or application changes.
+
+To re-export the edited test guide, install the optional documentation dependency `reportlab` and run `python docs/demo/export_test_guide.py`. It is not needed to run ResolveAI or upload the already generated documents.

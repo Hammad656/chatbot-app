@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Morrow — Your thought partner",
+  title: "ResolveAI — Company knowledge and support",
   description:
-    "A thoughtful AI assistant for questions, ideas, writing, and whatever comes next.",
+    "Answers from your company documents, support tools, and human-reviewed resolutions.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

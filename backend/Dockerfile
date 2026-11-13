@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt && useradd --create-home appu
 COPY --chown=appuser:appuser . .
 # Existing Windows checkouts can still contain CRLF before .gitattributes is applied.
 RUN sed -i 's/\r$//' scripts/start.sh
+RUN mkdir -p /var/lib/resolveai/uploads && chown appuser:appuser /var/lib/resolveai/uploads
 USER appuser
 EXPOSE 8000
 CMD ["sh", "scripts/start.sh"]

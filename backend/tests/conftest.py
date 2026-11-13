@@ -5,16 +5,19 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from database.models import Base
-from database.session import POSTGRES_URL, get_db
-from main import app
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from database.models import Base
+from database.session import POSTGRES_URL, get_db
+from main import app
+
 
 @pytest.fixture
-async def support_context(monkeypatch):
+async def support_context(monkeypatch, tmp_path):
     monkeypatch.setenv("RESOLVEAI_INLINE_WORKER", "false")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("JWT_SECRET_KEY", "temporary-integration-test-signing-key")
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("POSTGRES_PASSWORD", "nonempty-test-configuration-guard")
@@ -23,7 +26,9 @@ async def support_context(monkeypatch):
     async with admin.begin() as connection:
         await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     engine = create_async_engine(
-        POSTGRES_URL, connect_args={"server_settings": {"search_path": schema}}
+        POSTGRES_URL,
+        execution_options={"schema_translate_map": {None: schema}},
+        connect_args={"server_settings": {"search_path": schema + ",public"}},
     )
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -41,11 +46,11 @@ async def support_context(monkeypatch):
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         )
         clients.append(client)
-        client.headers["X-CSRF-Token"] = (await client.get("/api/auth/csrf")).json()[
+        client.headers["X-CSRF-Token"] = (await client.get("/api/v1/auth/csrf")).json()[
             "csrf_token"
         ]
         response = await client.post(
-            "/api/auth/signup",
+            "/api/v1/auth/signup",
             json={
                 "email": email or f"test-{uuid4().hex}@example.com",
                 "password": "temporary-test-password-123",

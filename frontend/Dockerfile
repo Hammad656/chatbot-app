@@ -7,11 +7,13 @@ FROM node:24-bookworm-slim AS builder
 WORKDIR /app
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_TELEMETRY_DISABLED=1
+ARG API_INTERNAL_URL=http://127.0.0.1:8000
+ENV API_INTERNAL_URL=$API_INTERNAL_URL NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
+ARG API_INTERNAL_URL=http://127.0.0.1:8000
+ENV API_INTERNAL_URL=$API_INTERNAL_URL
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 COPY --from=builder --chown=node:node /app/.next ./.next

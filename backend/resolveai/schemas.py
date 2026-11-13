@@ -29,6 +29,7 @@ class TicketCreate(StrictModel):
 
 class Question(StrictModel):
     question: str = Field(min_length=3, max_length=4000)
+    thread_id: UUID | None = None
 
 
 class Review(StrictModel):

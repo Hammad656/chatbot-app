@@ -1,84 +1,58 @@
-"""Document parsing and tenant-scoped local/Pinecone retrieval."""
+"""Company document parsing and workspace-scoped pgvector/keyword retrieval."""
 
 import math
+import os
 import re
 from collections import Counter
 from uuid import UUID
 
-from database.models import BusinessChunk, BusinessDocument
-from rag import (
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ai.embeddings import embed_texts
+from database.models import BusinessChunk, BusinessDocument, Workspace
+from resolveai.documents import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     MAX_EXTRACTED_CHARS,
-    CVChunk,
-    _pinecone_index,
-    extract_cv_chunks,
+    DocumentChunk,
+    extract_document_chunks,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
 
 
-def parse_document(filename: str, content: bytes) -> list[CVChunk]:
-    if filename.lower().endswith((".txt", ".md")):
-        try:
-            text = content.decode("utf-8-sig").strip()
-        except UnicodeDecodeError as error:
-            raise ValueError("Text documents must use UTF-8 encoding.") from error
-        if not text or len(text) > MAX_EXTRACTED_CHARS:
-            raise ValueError(
-                "Upload nonempty text containing at most 100,000 characters."
-            )
-        return [
-            CVChunk(text=text[start : start + CHUNK_SIZE], section="Document")
-            for start in range(0, len(text), CHUNK_SIZE - CHUNK_OVERLAP)
-        ]
-    return extract_cv_chunks(filename, content)
-
-
-def namespace(workspace_id: UUID) -> str:
-    return f"support-workspace-{workspace_id.hex}"
-
-
-def index_document(
-    workspace_id: UUID, document_id: UUID, chunks: list[CVChunk]
-) -> None:
-    index = _pinecone_index()
-    for start in range(0, len(chunks), 100):
-        index.documents.upsert(
-            namespace=namespace(workspace_id),
-            documents=[
-                {
-                    "_id": f"{document_id}-{start + offset}",
-                    "text": chunk.text,
-                    "document_id": str(document_id),
-                    "chunk_index": start + offset,
-                    "section": chunk.section,
-                }
-                for offset, chunk in enumerate(chunks[start : start + 100])
-            ],
+def parse_document(filename: str, content: bytes) -> list[DocumentChunk]:
+    if not filename.lower().endswith((".txt", ".md")):
+        return extract_document_chunks(filename, content)
+    try:
+        text = content.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError("Text documents must use UTF-8 encoding.") from error
+    if not text or len(text) > MAX_EXTRACTED_CHARS:
+        raise ValueError(
+            f"Upload nonempty text containing at most {MAX_EXTRACTED_CHARS:,} characters."
         )
-
-
-def delete_indexed_document(workspace_id: UUID, document_id: UUID) -> None:
-    _pinecone_index().documents.delete(
-        namespace=namespace(workspace_id),
-        filter={"document_id": {"$eq": str(document_id)}},
-    )
-
-
-def _search_index(workspace_id: UUID, ids: list[str], query: str):
-    return (
-        _pinecone_index()
-        .documents.search(
-            namespace=namespace(workspace_id),
-            top_k=5,
-            score_by=[{"type": "embed", "fields": ["text"], "query": query}],
-            filter={"document_id": {"$in": ids}},
-            include_fields=["document_id", "chunk_index"],
+    groups, paragraphs, path = [], [], []
+    for line in text.splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            if paragraphs:
+                groups.append((" / ".join(path) or "Document", "\n".join(paragraphs)))
+            level = len(heading[1])
+            path = path[: level - 1] + [heading[2]]
+            paragraphs = [line]
+        else:
+            paragraphs.append(line)
+    if paragraphs:
+        groups.append((" / ".join(path) or "Document", "\n".join(paragraphs)))
+    return [
+        DocumentChunk(
+            text=body[start : start + CHUNK_SIZE].strip(), section=section[:160]
         )
-        .matches
-    )
+        for section, body in groups
+        if body.strip()
+        for start in range(0, len(body), CHUNK_SIZE - CHUNK_OVERLAP)
+        if body[start : start + CHUNK_SIZE].strip()
+    ]
 
 
 STOP_WORDS = set(
@@ -97,60 +71,81 @@ def terms(text: str) -> set[str]:
 async def retrieve(
     db: AsyncSession, workspace_id: UUID, query: str, mode: str
 ) -> list[dict]:
-    rows = (
-        await db.execute(
-            select(BusinessChunk, BusinessDocument.filename)
-            .join(BusinessDocument, BusinessChunk.document_id == BusinessDocument.id)
-            .where(
-                BusinessChunk.workspace_id == workspace_id,
-                BusinessDocument.workspace_id == workspace_id,
-                BusinessDocument.status == "ready",
-            )
-            .order_by(BusinessChunk.document_id, BusinessChunk.position)
-        )
-    ).all()
-    if not rows:
-        return []
-    lookup = {
-        (str(chunk.document_id), chunk.position): (chunk, name) for chunk, name in rows
-    }
+    conditions = (
+        BusinessChunk.workspace_id == workspace_id,
+        BusinessDocument.workspace_id == workspace_id,
+        BusinessDocument.status == "ready",
+    )
     if mode == "gemini":
-        hits = await run_in_threadpool(
-            _search_index, workspace_id, list({key[0] for key in lookup}), query
-        )
-        selected = []
-        for hit in hits:
-            try:
-                key = (str(hit.get("document_id", "")), int(hit.get("chunk_index", -1)))
-            except (ValueError, TypeError):
-                continue
-            # Read source text from the authorized DB rows, never trust a remote hit
-            # to introduce a different tenant/document or fabricated source content.
-            if key in lookup and key not in selected:
-                selected.append(key)
+        if not await db.scalar(
+            select(BusinessChunk.id)
+            .join(BusinessDocument, BusinessChunk.document_id == BusinessDocument.id)
+            .where(*conditions, BusinessChunk.embedding.is_not(None))
+            .limit(1)
+        ):
+            return []
+        workspace = await db.get(Workspace, workspace_id)
+        vector = (await embed_texts([query], workspace.embedding_model, query=True))[0]
+        distance = BusinessChunk.embedding.cosine_distance(vector)
+        threshold = max(0.0, min(1.0, float(os.getenv("RAG_MIN_SIMILARITY", "0.35"))))
+        candidates = (
+            await db.execute(
+                select(
+                    BusinessChunk, BusinessDocument.filename, distance.label("distance")
+                )
+                .join(
+                    BusinessDocument, BusinessChunk.document_id == BusinessDocument.id
+                )
+                .where(*conditions, BusinessChunk.embedding.is_not(None))
+                .order_by(distance, BusinessChunk.id)
+                .limit(8)
+            )
+        ).all()
+        selected = [
+            (chunk, name, 1 - float(score))
+            for chunk, name, score in candidates
+            if 1 - float(score) >= threshold
+        ][:5]
     else:
-        query_terms = terms(query)
-        expanded = set(query_terms)
-        if query_terms & {"refund", "refunds", "return", "returns"}:
-            expanded.update({"refund", "refunds", "return", "returns"})
-        if query_terms & {"shipping", "shipped", "delivery", "tracking"}:
-            expanded.update({"shipping", "shipped", "delivery", "tracking"})
+        rows = (
+            await db.execute(
+                select(BusinessChunk, BusinessDocument.filename)
+                .join(
+                    BusinessDocument, BusinessChunk.document_id == BusinessDocument.id
+                )
+                .where(*conditions)
+                .order_by(BusinessChunk.document_id, BusinessChunk.position)
+            )
+        ).all()
+        expanded = terms(query)
+        for synonyms in (
+            {"refund", "refunds", "return", "returns"},
+            {"shipping", "shipped", "delivery", "tracking"},
+        ):
+            if expanded & synonyms:
+                expanded.update(synonyms)
         frequencies = Counter(word for chunk, _ in rows for word in terms(chunk.text))
         ranked = []
-        for key, (chunk, _) in lookup.items():
+        for chunk, name in rows:
             overlap = expanded & terms(chunk.text)
             score = sum(math.log(1 + len(rows) / frequencies[word]) for word in overlap)
             if score:
-                ranked.append((score, key))
-        selected = [key for _, key in sorted(ranked, reverse=True)[:5]]
+                ranked.append((score, chunk.position, chunk, name))
+        selected = [
+            (chunk, name, None)
+            for _, _, chunk, name in sorted(
+                ranked, key=lambda x: (x[0], x[1]), reverse=True
+            )[:5]
+        ]
     return [
         {
             "id": number,
-            "document_id": key[0],
-            "filename": lookup[key][1],
-            "section": lookup[key][0].section,
-            "position": key[1],
-            "text": lookup[key][0].text,
+            "document_id": str(chunk.document_id),
+            "filename": name,
+            "section": chunk.section,
+            "position": chunk.position,
+            "text": chunk.text,
+            "score": score,
         }
-        for number, key in enumerate(selected, start=1)
+        for number, (chunk, name, score) in enumerate(selected, 1)
     ]

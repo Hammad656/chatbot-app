@@ -1,7 +1,7 @@
 import asyncio
 import os
-from pathlib import Path
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from dotenv import load_dotenv
@@ -23,8 +23,12 @@ target_metadata = Base.metadata
 def database_url() -> URL:
     return URL.create(
         "postgresql+asyncpg",
-        username=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", ""),
+        username=os.getenv(
+            "MIGRATION_POSTGRES_USER", os.getenv("POSTGRES_USER", "postgres")
+        ),
+        password=os.getenv(
+            "MIGRATION_POSTGRES_PASSWORD", os.getenv("POSTGRES_PASSWORD", "")
+        ),
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
         database=os.getenv("POSTGRES_DB", "chatbot-db"),

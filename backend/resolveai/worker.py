@@ -1,25 +1,40 @@
-"""Durable PostgreSQL document queue; run standalone or inside the API lifespan."""
+"""Idempotent ingestion service called by the Redis-backed worker."""
 
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from database.models import BusinessChunk, BusinessDocument, SupportAudit, Workspace
-from database.session import async_session_factory
+from fastapi import HTTPException
 from sqlalchemy import and_, delete, or_, select
 from starlette.concurrency import run_in_threadpool
 
-from resolveai.knowledge import delete_indexed_document, index_document, parse_document
+from ai.embeddings import embed_texts
+from database.models import BusinessChunk, BusinessDocument, SupportAudit, Workspace
+from database.session import async_session_factory
+from database.tenant import set_tenant
+from resolveai.documents import DocumentChunk
+from resolveai.knowledge import parse_document
+from resolveai.storage import delete_upload, read_upload
 
 logger = logging.getLogger(__name__)
 
 
-async def process_once(factory=async_session_factory) -> bool:
+async def process_once(
+    factory=async_session_factory, workspace_id=None, document_id=None
+) -> bool:
     async with factory() as db:
+        if workspace_id is not None:
+            await set_tenant(db, workspace_id)
         document = await db.scalar(
             select(BusinessDocument)
             .where(
+                *(
+                    [BusinessDocument.workspace_id == workspace_id]
+                    if workspace_id
+                    else []
+                ),
+                *([BusinessDocument.id == document_id] if document_id else []),
                 or_(
                     BusinessDocument.status == "queued",
                     and_(
@@ -27,13 +42,13 @@ async def process_once(factory=async_session_factory) -> bool:
                         or_(
                             BusinessDocument.lease_id.is_(None),
                             BusinessDocument.updated_at
-                            < datetime.now(timezone.utc) - timedelta(minutes=5),
+                            < datetime.now(timezone.utc) - timedelta(minutes=12),
                         ),
                     ),
                     and_(
                         BusinessDocument.status == "processing",
                         BusinessDocument.updated_at
-                        < datetime.now(timezone.utc) - timedelta(minutes=5),
+                        < datetime.now(timezone.utc) - timedelta(minutes=12),
                     ),
                 )
             )
@@ -55,7 +70,25 @@ async def process_once(factory=async_session_factory) -> bool:
             document.workspace_id,
             workspace.ai_mode,
         )
-        filename, content = document.filename, document.content
+        filename, content, storage_key = (
+            document.filename,
+            document.content,
+            document.storage_key,
+        )
+        embedding_model = workspace.embedding_model
+        old_chunks = (
+            await db.scalars(
+                select(BusinessChunk)
+                .where(
+                    BusinessChunk.document_id == document_id,
+                    BusinessChunk.workspace_id == workspace_id,
+                )
+                .order_by(BusinessChunk.position)
+            )
+        ).all()
+        saved_chunks = [
+            DocumentChunk(text=x.text, section=x.section) for x in old_chunks
+        ]
         lease = str(uuid4())
         document.status = "deleting" if removing else "processing"
         document.attempts += 1
@@ -63,26 +96,29 @@ async def process_once(factory=async_session_factory) -> bool:
         document.updated_at = datetime.now(timezone.utc)
         await db.commit()
     try:
-        async with asyncio.timeout(90):
+        async with asyncio.timeout(600):
             if removing:
-                if mode == "gemini":
-                    await run_in_threadpool(
-                        delete_indexed_document, workspace_id, document_id
-                    )
-                chunks = []
+                chunks, vectors = [], []
             else:
-                chunks = await run_in_threadpool(
-                    parse_document, filename, content or b""
-                )
-                if not chunks or len(chunks) > 150:
+                if content is None and storage_key:
+                    content = await run_in_threadpool(read_upload, storage_key)
+                if content:
+                    chunks = await run_in_threadpool(parse_document, filename, content)
+                else:
+                    chunks = saved_chunks
+                if not chunks or len(chunks) > 500:
                     raise ValueError(
-                        "Documents must produce between 1 and 150 passages."
+                        "Documents must produce between 1 and 500 passages."
                     )
-                if mode == "gemini":
-                    await run_in_threadpool(
-                        index_document, workspace_id, document_id, chunks
+                vectors = (
+                    await embed_texts(
+                        [x.section + "\n" + x.text for x in chunks], embedding_model
                     )
+                    if mode == "gemini"
+                    else [None] * len(chunks)
+                )
         async with factory() as db:
+            await set_tenant(db, workspace_id)
             current = await db.scalar(
                 select(BusinessDocument)
                 .where(
@@ -92,11 +128,7 @@ async def process_once(factory=async_session_factory) -> bool:
                 .with_for_update()
             )
             if current is None or current.lease_id != lease:
-                # Another request removed/replaced the leased document while indexing.
-                if mode == "gemini":
-                    await run_in_threadpool(
-                        delete_indexed_document, workspace_id, document_id
-                    )
+                # Lease was superseded; this worker must not overwrite newer state.
                 return True
             if removing:
                 await db.delete(current)
@@ -115,6 +147,7 @@ async def process_once(factory=async_session_factory) -> bool:
                             position=i,
                             section=chunk.section,
                             text=chunk.text,
+                            embedding=vectors[i],
                         )
                         for i, chunk in enumerate(chunks)
                     ]
@@ -130,14 +163,21 @@ async def process_once(factory=async_session_factory) -> bool:
                 )
             )
             await db.commit()
+            if removing:
+                await run_in_threadpool(delete_upload, storage_key)
     except Exception as error:
         # A failed job remains durable and visible; no silent switch to local mode.
         message = (
-            str(error)[:500]
-            if isinstance(error, ValueError)
-            else "Document processing failed. Check provider configuration and retry."
+            str(error.detail)[:500]
+            if isinstance(error, HTTPException)
+            else (
+                str(error)[:500]
+                if isinstance(error, (ValueError, HTTPException))
+                else "Document processing failed. Check provider configuration and retry."
+            )
         )
         async with factory() as db:
+            await set_tenant(db, workspace_id)
             current = await db.scalar(
                 select(BusinessDocument)
                 .where(

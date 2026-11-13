@@ -94,6 +94,7 @@ export type Audit = {
 };
 export type Answer = {
   id: string;
+  thread_id: string | null;
   question: string;
   answer: string;
   sources: Source[];
@@ -107,6 +108,7 @@ export type Snapshot = {
   orders: Order[];
   audit: Audit[];
   answers: Answer[];
+  threads: { id: string; title: string; created_at: string }[];
   members: { email: string; role: string }[];
   metrics: {
     tickets: number;

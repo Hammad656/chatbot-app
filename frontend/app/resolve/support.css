@@ -1725,3 +1725,25 @@
     scroll-behavior: auto !important;
   }
 }
+
+.r-chat-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.r-chat-toolbar label {
+  flex: 1;
+  min-width: 0;
+}
+.r-chat-toolbar button {
+  flex-shrink: 0;
+}
+@media (max-width: 520px) {
+  .r-chat-toolbar {
+    flex-wrap: wrap;
+  }
+  .r-chat-toolbar label {
+    flex-basis: 100%;
+  }
+}

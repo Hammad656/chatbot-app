@@ -1,6 +1,8 @@
 fastapi>=0.115,<1.0
 google-genai>=1.0,<2.0
-pinecone>=10,<11
+pgvector>=0.3,<1
+arq>=0.26,<1
+redis>=5,<6
 python-docx>=1.1,<2.0
 python-multipart>=0.0.20,<1.0
 pypdf>=5,<7
@@ -13,5 +15,4 @@ pwdlib[argon2]>=0.2,<1.0
 PyJWT>=2.10,<3.0
 email-validator>=2.2,<3.0
 langchain-core>=1.8,<2.0
-langgraph>=1.2,<2.0
 httpx>=0.28,<1.0
