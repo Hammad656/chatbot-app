@@ -36,6 +36,8 @@ async def support_context(monkeypatch, tmp_path):
         from database.security_v2 import install_invitation_function
 
         await connection.run_sync(lambda c: install_invitation_function(c, schema))
+        from database.security_v3 import install_functions
+        await connection.run_sync(lambda c: install_functions(c, schema))
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def test_db():

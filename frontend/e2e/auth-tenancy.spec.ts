@@ -1,6 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { AuthSession } from "../app/resolve/types";
 
 const ui = (page: Page) => page.getByRole("main");
@@ -53,6 +55,243 @@ async function createWorkspace(
   return (await response.json()) as AuthSession;
 }
 
+test("customer order chat, human approval, actual portal delivery and visible roles", async ({
+  page,
+  browser,
+}, testInfo) => {
+  let embedHTML = "";
+  const embedServer = createServer((_request, response) => {
+    response.setHeader("Content-Type", "text/html");
+    response.end(embedHTML);
+  });
+  await new Promise<void>((resolve, reject) => {
+    embedServer.once("error", reject);
+    embedServer.listen(0, "127.0.0.1", resolve);
+  });
+  const embedOrigin = `http://127.0.0.1:${(embedServer.address() as AddressInfo).port}`;
+  try {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await signup(
+      page,
+      `portal-owner-${unique()}@example.com`,
+      "Portal Company Owner",
+    );
+    await createWorkspace(page, "Aurora customer support " + unique(), true);
+    await expect(
+      ui(page).getByLabel("Signed in as owner", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      ui(page).getByRole("button", { name: "Log out", exact: true }),
+    ).toBeVisible();
+    await ui(page)
+      .getByRole("button", { name: "Load demo data", exact: true })
+      .click();
+    await ui(page).getByRole("link", { name: "Settings", exact: true }).click();
+    await ui(page).getByLabel("Enable customer chat for this company").check();
+    await ui(page).getByLabel("Allowed website origins").fill(embedOrigin);
+    await ui(page)
+      .getByRole("button", { name: "Save settings", exact: true })
+      .click();
+    await expect(
+      ui(page).getByText("Chat is enabled", { exact: true }),
+    ).toBeVisible();
+    const supportPath = await ui(page)
+      .getByRole("link", { name: "Open customer chat" })
+      .getAttribute("href");
+    expect(supportPath).toMatch(/^\/widget\//);
+    await ui(page)
+      .getByLabel("Customer name", { exact: true })
+      .fill("Alex Customer");
+    await ui(page)
+      .getByLabel("Customer email", { exact: true })
+      .fill("alex@example.com");
+    await ui(page)
+      .getByRole("button", { name: "Create private access link", exact: true })
+      .click();
+    const privateLink = await ui(page)
+      .getByLabel("Private customer link", { exact: true })
+      .inputValue();
+    expect(privateLink).toContain("#access=");
+    const customerContext = await browser.newContext();
+    const customer = await customerContext.newPage();
+    customer.on("pageerror", (error) => errors.push(error.message));
+    await customer.goto(privateLink);
+    await expect(
+      customer.getByText("Customer · Signed in", { exact: true }),
+    ).toBeVisible();
+    await expect(customer).not.toHaveURL(/#access=/);
+    await customer
+      .getByLabel("Your message", { exact: true })
+      .fill("Where is my order?");
+    await customer
+      .getByRole("button", { name: "Send message", exact: true })
+      .click();
+    await expect(customer.locator(".customer-assistant").last()).toContainText(
+      "share your order reference",
+      { timeout: 90000 },
+    );
+    await customer
+      .getByLabel("Your message", { exact: true })
+      .fill("Where is my order ORD-1001?");
+    await customer
+      .getByRole("button", { name: "Send message", exact: true })
+      .click();
+    await expect(
+      customer.getByText("Your support team is on it.", { exact: true }),
+    ).toBeVisible({ timeout: 90000 });
+    await expect(customer.locator(".customer-agent")).toHaveCount(0);
+    await ui(page)
+      .getByRole("link", { name: "Conversations", exact: true })
+      .click();
+    await ui(page)
+      .getByRole("button", { name: /Where is my order ORD-1001/ })
+      .click();
+    await ui(page)
+      .getByRole("link", { name: /Open support ticket/ })
+      .click();
+    const approve = ui(page).getByRole("button", {
+      name: "Approve & deliver reply",
+      exact: true,
+    });
+    await expect(approve).toBeVisible({ timeout: 90000 });
+    await expect(
+      ui(page).getByLabel("Reply for review", { exact: true }),
+    ).toHaveValue(/shipped/);
+    await page.screenshot({
+      path: testInfo.outputPath("staff-order-review.png"),
+      fullPage: true,
+    });
+    await approve.click();
+    await expect(customer.locator(".customer-agent").last()).toContainText(
+      "shipped",
+      { timeout: 60000 },
+    );
+    await expect(ui(page).locator(".r-badge.r-replied").first()).toBeVisible();
+    await customer
+      .locator(".customer-agent")
+      .last()
+      .getByRole("button", { name: "Yes", exact: true })
+      .click();
+    await expect(
+      customer
+        .locator(".customer-agent")
+        .last()
+        .getByRole("button", { name: "Yes", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await customer.reload();
+    await expect(
+      customer.getByText("Customer · Signed in", { exact: true }),
+    ).toBeVisible();
+    await expect(customer.locator(".customer-agent")).toContainText("shipped");
+    expect(await customer.locator(".customer-agent").count()).toBe(1);
+    const stored = await customer.evaluate(() =>
+      [...Object.values(localStorage), ...Object.values(sessionStorage)].join(
+        " ",
+      ),
+    );
+    expect(stored).not.toMatch(/eyJ[A-Za-z0-9_-]+\./);
+    for (const width of [1440, 768, 390, 320]) {
+      await customer.setViewportSize({ width, height: 900 });
+      await expect(
+        customer.getByRole("button", { name: "Log out", exact: true }),
+      ).toBeVisible();
+      expect(
+        await customer.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+        ),
+      ).toBe(true);
+    }
+    await customer.screenshot({
+      path: testInfo.outputPath("customer-order-mobile.png"),
+      fullPage: true,
+    });
+    const secondCustomer = await customerContext.newPage();
+    await secondCustomer.goto(new URL(supportPath!, privateLink).toString());
+    await expect(
+      secondCustomer.getByText("Customer · Signed in", { exact: true }),
+    ).toBeVisible();
+    await customer
+      .getByRole("button", { name: "Log out", exact: true })
+      .click();
+    await expect(
+      customer.getByRole("heading", {
+        name: "You’re safely signed out.",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(customer.getByText("shipped")).toHaveCount(0);
+    await expect(
+      secondCustomer.getByRole("heading", {
+        name: "You’re safely signed out.",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(secondCustomer.locator(".customer-agent")).toHaveCount(0);
+    const guestContext = await browser.newContext();
+    const guest = await guestContext.newPage();
+    await guest.goto(new URL(supportPath!, privateLink).toString());
+    await expect(
+      guest.getByText("Guest customer", { exact: true }),
+    ).toBeVisible();
+    await guest
+      .getByLabel("Your message", { exact: true })
+      .fill("Where is my order ORD-1001?");
+    await guest
+      .getByRole("button", { name: "Send message", exact: true })
+      .click();
+    await expect(guest.locator(".customer-assistant").last()).toContainText(
+      "private customer access link",
+      { timeout: 90000 },
+    );
+    const framePolicy = await page.request.get(supportPath!);
+    expect(framePolicy.headers()["content-security-policy"]).toContain(
+      embedOrigin,
+    );
+    expect(framePolicy.headers()["content-security-policy"]).not.toContain(
+      "unapproved.example",
+    );
+    const embed = await guestContext.newPage();
+    const appOrigin = new URL(privateLink).origin;
+    const key = supportPath!.split("/").pop();
+    embedHTML = `<html><head><title>Company widget test</title></head><body><h1>Company website</h1><script src="${appOrigin}/widget.js" data-workspace="${key}" defer></script></body></html>`;
+    await embed.goto(embedOrigin);
+    await embed
+      .getByRole("button", { name: "Open customer support", exact: true })
+      .click();
+    await expect(
+      embed
+        .frameLocator('iframe[title="Customer support conversation"]')
+        .getByText("Guest customer", { exact: true }),
+    ).toBeVisible();
+    await ui(page)
+      .getByRole("link", { name: "Approvals", exact: true })
+      .click();
+    await ui(page)
+      .getByRole("combobox", { name: "Action status", exact: true })
+      .selectOption("succeeded");
+    await expect(
+      ui(page).getByRole("heading", {
+        name: "Send a reviewed reply",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("approvals-desktop.png"),
+      fullPage: true,
+    });
+    await ui(page)
+      .getByRole("button", { name: "Log out", exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/login$/);
+    expect(errors).toEqual([]);
+    await customerContext.close();
+    await guestContext.close();
+  } finally {
+    await new Promise<void>((resolve) => embedServer.close(() => resolve()));
+  }
+});
+
 test("visible auth pages, login errors, reload, cross-tab refresh and logout", async ({
   page,
   context,
@@ -93,7 +332,7 @@ test("visible auth pages, login errors, reload, cross-tab refresh and logout", a
     await expect(
       tab.getByRole("heading", { name: "Company knowledge chat", exact: true }),
     ).toBeVisible();
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByRole("button", { name: "Log out", exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
   await expect(second).toHaveURL(/\/login$/);
   await second.close();
@@ -114,7 +353,13 @@ test("visible auth pages, login errors, reload, cross-tab refresh and logout", a
     expect(schema.paths[`/api/v1/auth/${endpoint}`]).toBeDefined();
   expect((await page.request.get("/docs")).status()).toBe(200);
   await page.getByRole("link", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  // Next.js retains hidden routes with the same header. Wait for the destination
+  // before resolving its logout control so a transition cannot retain the old handle.
+  await expect(
+    ui(page).getByRole("heading", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await ui(page).getByRole("button", { name: "Log out", exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
   await page
     .getByRole("link", { name: "Create an account", exact: true })
@@ -209,19 +454,15 @@ test("company RAG stays isolated across workspaces, accounts and invitation role
     .getByRole("button", { name: "Prepare draft", exact: true })
     .click();
   const approve = page.getByRole("button", {
-    name: "Approve & run mock action",
+    name: "Approve & record reply",
     exact: true,
   });
   await expect(approve).toBeVisible({ timeout: 90000 });
   await approve.click();
-  await expect(
-    ui(page).locator(".r-badge.r-executed").first(),
-  ).toBeVisible();
+  await expect(ui(page).locator(".r-badge.r-executed").first()).toBeVisible();
   await page.reload();
   await expect(page).toHaveURL(ticketURL);
-  await expect(
-    ui(page).locator(".r-badge.r-executed").first(),
-  ).toBeVisible();
+  await expect(ui(page).locator(".r-badge.r-executed").first()).toBeVisible();
   await page.getByRole("link", { name: "Knowledge base", exact: true }).click();
   await createWorkspace(page, bName);
   await expect(ui(page).getByText(filename, { exact: true })).toHaveCount(0);

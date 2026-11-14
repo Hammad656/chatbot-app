@@ -31,7 +31,7 @@ sources, mock orders, reviewer controls, audit history and team membership.
 ## Auth and navigation
 
 Dedicated pages: `/login`, `/signup`, `/onboarding`, `/dashboard`, `/knowledge`,
-`/tickets`, `/mock-orders`, `/activity`, `/settings`, `/settings/members`, `/invite`.
+`/tickets`, `/conversations`, `/approvals`, `/mock-orders`, `/activity`, `/settings`, `/settings/members`, `/invite`.
 All use the same origin and API; these are pages in one app, not separate servers.
 
 `auth-form.tsx` provides visible sign-in/signup links, actionable errors, password
@@ -59,3 +59,20 @@ npm run test:e2e
 Set `E2E_BASE_URL` to use another development origin. Tests create synthetic
 accounts/workspaces and use the actual document worker in Local demo mode.
 They do not call a model provider. CI creates its own disposable Compose stack.
+
+## Customer portal and visual update
+
+The navy glass palette uses cyan/violet accents, semantic status colors and
+motion that respects reduced-motion preferences. A prominent header logout
+button and live staff role label appear throughout the dashboard.
+
+`/widget/[workspaceKey]` is the customer support view in the same app. It shows
+Guest customer or Customer · Signed in, keeps credentials in memory, streams
+validated answers, polls for reviewed replies, restores one-hour sessions and
+clears cross-tab/cached identity data on logout. `public/widget.js` embeds that
+view in an iframe. `proxy.ts` supplies the exact-origin framing CSP.
+
+Workspace Settings enables chat, manages embed origins and issues private customer
+access links. Conversations, Approvals and ticket controls expose intake, handoffs,
+assignment, review and delivery outcomes. See
+[Customer workflow](../docs/CUSTOMER_WORKFLOW.md) for the complete test sequence.

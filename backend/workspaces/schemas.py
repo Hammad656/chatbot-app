@@ -9,6 +9,8 @@ from resolveai.schemas import MemberCreate, StrictModel
 class Settings(StrictModel):
     tone: Literal["professional", "friendly", "concise"] = "professional"
     similarity_threshold: float = Field(default=0.35, ge=0, le=1)
+    widget_enabled: bool = False
+    order_provider: Literal["internal", "external"] = "internal"
 
 
 class WorkspaceUpdate(StrictModel):

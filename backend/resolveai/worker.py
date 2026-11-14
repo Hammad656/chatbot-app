@@ -50,7 +50,7 @@ async def process_once(
                         BusinessDocument.updated_at
                         < datetime.now(timezone.utc) - timedelta(minutes=12),
                     ),
-                )
+                ),
             )
             .order_by(BusinessDocument.created_at)
             .with_for_update(skip_locked=True)

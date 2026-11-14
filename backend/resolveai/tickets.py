@@ -16,6 +16,7 @@ from database.models import (
     SupportAudit,
     SupportRun,
     SupportTicket,
+    CustomerConversation,
     Workspace,
     WorkspaceMember,
 )
@@ -53,6 +54,14 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
                 WorkspaceMember.user_id == actor,
             )
         )
+        if actor is None and context.get("customer_conversation_id") == str(
+            ticket.customer_conversation_id if ticket else None
+        ):
+            authorized = (
+                await db.get(CustomerConversation, ticket.customer_conversation_id)
+                if ticket and ticket.customer_conversation_id
+                else None
+            )
         if (
             not authorized
             or ticket is None
@@ -88,6 +97,8 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
             "customer_email": ticket.customer_email,
             "order_reference": ticket.order_reference,
         }
+        if context.get("triage"):
+            initial["triage"] = context["triage"]
         await db.commit()
     engine = SupportEngine(
         mode,
@@ -149,12 +160,14 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
                         )
                     )
                 )
-                run.status, run.error = "queued" if retry else "failed", str(
-                    failure.detail
-                )[:500]
+                run.status, run.error = (
+                    "queued" if retry else "failed",
+                    str(failure.detail)[:500],
+                )
                 ticket.status, ticket.last_error = (
-                    "processing" if retry else "open"
-                ), run.error
+                    ("processing" if retry else "open"),
+                    run.error,
+                )
                 event = "workflow.retry_queued" if retry else "workflow.failed"
             else:
                 run.status = "completed"
@@ -173,6 +186,9 @@ async def process_ticket_once(factory=async_session_factory, *, workspace_id, ru
                     result["sources"],
                     result["tool_calls"],
                 )
+                from resolveai.actions import proposal
+
+                await proposal(db, ticket)
                 event = "workflow.prepared"
             db.add(
                 SupportAudit(

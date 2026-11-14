@@ -6,11 +6,9 @@ from typing import TypedDict
 
 from fastapi import HTTPException
 from langchain_core.tools import tool
-from sqlalchemy import select
 
 from ai.gemini import GeminiLLMClient
 from ai.prompts import prompt
-from database.models import DemoOrder
 from resolveai.knowledge import retrieve, terms
 from resolveai.schemas import Draft, OrderLookup, Triage
 
@@ -53,7 +51,9 @@ def local_triage(subject: str, message: str, reference: str | None) -> Triage:
     priority = (
         "urgent"
         if "security" in text or "fraud" in text
-        else "high" if "urgent" in text or "charged twice" in text else "normal"
+        else "high"
+        if "urgent" in text or "charged twice" in text
+        else "normal"
     )
     return Triage(
         category=category,
@@ -67,27 +67,10 @@ def local_triage(subject: str, message: str, reference: str | None) -> Triage:
 def order_tool(db, workspace_id, customer_email):
     @tool("lookup_order", args_schema=OrderLookup)
     async def lookup_order(reference: str) -> dict:
-        """Read a mock order in this workspace for this ticket's customer. Cannot mutate it."""
-        order = await db.scalar(
-            select(DemoOrder).where(
-                DemoOrder.workspace_id == workspace_id,
-                DemoOrder.reference == reference,
-                DemoOrder.customer_email == customer_email.lower(),
-            )
-        )
-        if order is None:
-            return {"found": False}
-        return {
-            "found": True,
-            "id": str(order.id),
-            "reference": order.reference,
-            "status": order.status,
-            "item": order.item,
-            "amount_cents": order.amount_cents,
-            "currency": order.currency,
-            "refundable": order.refundable,
-            "replaceable": order.replaceable,
-        }
+        """Read an authorized order for this workspace and customer. Cannot mutate it."""
+        from resolveai.orders import lookup_order as read_order
+
+        return await read_order(db, workspace_id, customer_email, reference)
 
     return lookup_order
 
@@ -120,7 +103,9 @@ class SupportEngine:
                 return await self.graph(session, workspace_id, initial)
 
         async def classify(state):
-            if self.mode == "local":
+            if state.get("triage"):
+                triage = Triage.model_validate(state["triage"])
+            elif self.mode == "local":
                 triage = local_triage(
                     state["subject"], state["message"], state.get("order_reference")
                 )
@@ -165,9 +150,7 @@ class SupportEngine:
             order, sources = state["order"], state["sources"]
             requested = state["triage"]["requested_action"]
             action = "reply"
-            rationale = (
-                "The proposed reply requires human review before simulated delivery."
-            )
+            rationale = "The proposed reply requires human review before delivery."
             if requested in ("refund", "replacement"):
                 evidence_words = (
                     {"refund", "refunds", "return", "returns"}

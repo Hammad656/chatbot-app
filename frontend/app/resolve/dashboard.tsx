@@ -15,6 +15,11 @@ import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import { TeamPanel, SettingsPanel } from "./workspace-panels";
 import {
+  ApprovalsPanel,
+  CustomerConversationsPanel,
+  TicketControls,
+} from "./customer-panels";
+import {
   APIError,
   request,
   acceptSession,
@@ -36,6 +41,8 @@ import type {
 import "./support.css";
 
 type View =
+  | "conversations"
+  | "approvals"
   | "overview"
   | "tickets"
   | "knowledge"
@@ -44,6 +51,8 @@ type View =
   | "team"
   | "settings";
 const pagePaths: Record<View, string> = {
+  conversations: "/conversations",
+  approvals: "/approvals",
   overview: "/dashboard",
   tickets: "/tickets",
   knowledge: "/knowledge",
@@ -70,6 +79,18 @@ const pages: { id: View; label: string; icon: string; note: string }[] = [
     label: "Knowledge base",
     icon: "book",
     note: "Ground every answer in your company documents.",
+  },
+  {
+    id: "conversations",
+    label: "Conversations",
+    icon: "users",
+    note: "Every customer question, answer and human handoff, in one place.",
+  },
+  {
+    id: "approvals",
+    label: "Approvals",
+    icon: "shield",
+    note: "Review the evidence. Approve the next step. Stay in control.",
   },
   {
     id: "orders",
@@ -434,7 +455,10 @@ export default function ResolveAI({
     ) ?? false;
   const pendingWork =
     pendingDocs ||
-    (snapshot?.tickets.some((item) => item.status === "processing") ?? false);
+    (snapshot?.tickets.some((item) =>
+      ["processing", "delivery_pending"].includes(item.status),
+    ) ??
+      false);
   useEffect(() => {
     if (!pendingWork || !workspaceId) return;
     const timer = window.setInterval(() => void refresh(workspaceId), 2000);
@@ -443,9 +467,10 @@ export default function ResolveAI({
   useEffect(() => {
     const updated = snapshot?.tickets.find((item) => item.id === ticket?.id);
     if (
-      ticket?.status !== "processing" ||
+      !ticket ||
+      !["processing", "delivery_pending"].includes(ticket?.status ?? "") ||
       !updated ||
-      updated.status === "processing"
+      ["processing", "delivery_pending"].includes(updated.status)
     )
       return;
     let active = true;
@@ -792,8 +817,8 @@ export default function ResolveAI({
                 <Icon name="shield" />
                 <strong>Humans make the call.</strong>
                 <p>
-                  Every draft waits for review. Order actions and delivery are
-                  simulated.
+                  Sensitive actions wait for approval. Your reviewed replies
+                  reach customers here.
                 </p>
               </div>
               <div className="r-account">
@@ -828,7 +853,18 @@ export default function ResolveAI({
                           : "gemini"
                       }
                     />
-                    <Badge value={snapshot.workspace.role} />
+                    <span
+                      className={`r-role-status r-role-${snapshot.workspace.role}`}
+                      aria-label={`Signed in as ${snapshot.workspace.role}`}
+                    >
+                      <i />
+                      {snapshot.workspace.role === "owner"
+                        ? "Owner"
+                        : snapshot.workspace.role === "admin"
+                          ? "Admin"
+                          : "Support agent"}{" "}
+                      · Signed in
+                    </span>
                   </>
                 )}
                 <button
@@ -838,6 +874,14 @@ export default function ResolveAI({
                   onClick={() => void refresh(workspaceId)}
                 >
                   <Icon name="refresh" size={17} />
+                </button>
+                <button
+                  className="r-button r-logout"
+                  aria-label="Log out"
+                  onClick={() => void signOut()}
+                  disabled={!!busy}
+                >
+                  <span aria-hidden="true">↪</span> Log out
                 </button>
               </div>
             </header>
@@ -927,7 +971,7 @@ export default function ResolveAI({
                             "Waiting for review",
                             snapshot.metrics.statuses.awaiting_approval ?? 0,
                             "shield",
-                            "An admin’s next decision",
+                            "Your team’s next decision",
                           ],
                           [
                             "Ready documents",
@@ -953,6 +997,30 @@ export default function ResolveAI({
                             <small>{hint}</small>
                           </article>
                         ))}
+                      </div>
+                      <div className="r-customer-metrics">
+                        <Link href="/conversations">
+                          <span>Customer conversations ↗</span>
+                          <strong>
+                            {snapshot.metrics.customer_conversations}
+                          </strong>
+                          <small>Questions and handoffs, together</small>
+                        </Link>
+                        <Link href="/conversations">
+                          <span>Answered from knowledge ↗</span>
+                          <strong>
+                            {snapshot.metrics.self_service_answers}
+                          </strong>
+                          <small>Grounded self-service answers</small>
+                        </Link>
+                        <Link href="/approvals">
+                          <span>Reviewed replies delivered ↗</span>
+                          <strong>{snapshot.metrics.delivered_replies}</strong>
+                          <small>
+                            {snapshot.metrics.queued_actions} approved actions
+                            queued
+                          </small>
+                        </Link>
                       </div>
                       <div className="r-overview-grid">
                         <section className="r-panel">
@@ -1011,7 +1079,7 @@ export default function ResolveAI({
                               ],
                               [
                                 "Review & resolve",
-                                "An admin approves once. Every decision is recorded.",
+                                "An authorized reviewer approves. Every decision is recorded.",
                               ],
                             ].map(([title, description], i) => (
                               <li key={title}>
@@ -1085,6 +1153,9 @@ export default function ResolveAI({
                               "open",
                               "processing",
                               "awaiting_approval",
+                              "delivery_pending",
+                              "replied",
+                              "resolved",
                               "executed",
                               "rejected",
                               "escalated",
@@ -1140,7 +1211,11 @@ export default function ResolveAI({
                                 className="r-button"
                                 disabled={
                                   !!busy ||
-                                  ticket.status === "executed" ||
+                                  [
+                                    "executed",
+                                    "resolved",
+                                    "delivery_pending",
+                                  ].includes(ticket.status) ||
                                   ticket.status === "processing"
                                 }
                                 onClick={() => void draftTicket()}
@@ -1154,6 +1229,20 @@ export default function ResolveAI({
                                     : "Prepare draft"}
                               </button>
                             </div>
+                            <TicketControls
+                              key={`${ticket.id}-${ticket.revision}`}
+                              ticket={ticket}
+                              workspace={snapshot.workspace}
+                              user={user}
+                              onSaved={async () => {
+                                const data = await request<TicketDetail>(
+                                  `${base}/tickets/${ticket.id}`,
+                                );
+                                setTicket(data);
+                                setReply(data.draft ?? "");
+                                await refresh(workspaceId);
+                              }}
+                            />
                             <div className="r-customer-message">
                               <span>CUSTOMER REQUEST</span>
                               <p>{ticket.description}</p>
@@ -1162,6 +1251,21 @@ export default function ResolveAI({
                               <p className="r-inline-error">
                                 {ticket.last_error}
                               </p>
+                            )}
+                            {ticket.status === "delivery_pending" && (
+                              <div className="r-delivery-pending" role="status">
+                                <span className="r-online-dot" />
+                                <div>
+                                  <strong>
+                                    Approved · Queued for delivery
+                                  </strong>
+                                  <p>
+                                    The worker will recheck permissions and
+                                    record the outcome. Customer replies appear
+                                    in their conversation.
+                                  </p>
+                                </div>
+                              </div>
                             )}
                             {(busy === "draft" ||
                               ticket.status === "processing") && (
@@ -1202,7 +1306,7 @@ export default function ResolveAI({
                                     maxLength={12000}
                                     value={reply}
                                     disabled={
-                                      !admin ||
+                                      !canReview ||
                                       ticket.status !== "awaiting_approval" ||
                                       !!busy
                                     }
@@ -1211,6 +1315,11 @@ export default function ResolveAI({
                                     }
                                   />
                                 </label>
+                                <p className="r-mini-note">
+                                  {ticket.customer_conversation_id
+                                    ? "Approved replies are delivered to the customer’s support conversation."
+                                    : "Manual ticket: approved replies are recorded in this support inbox."}
+                                </p>
                                 {ticket.status === "awaiting_approval" &&
                                   (canReview ? (
                                     <div className="r-review-actions">
@@ -1222,7 +1331,14 @@ export default function ResolveAI({
                                         <Icon name="check" size={16} />
                                         {busy === "review"
                                           ? "Recording…"
-                                          : "Approve & run mock action"}
+                                          : ["refund", "replacement"].includes(
+                                                ticket.proposed_action.kind ??
+                                                  "",
+                                              )
+                                            ? `Approve simulated ${ticket.proposed_action.kind}`
+                                            : ticket.customer_conversation_id
+                                              ? "Approve & deliver reply"
+                                              : "Approve & record reply"}
                                       </button>
                                       <button
                                         className="r-button r-danger"
@@ -1556,6 +1672,18 @@ export default function ResolveAI({
                         </div>
                       </section>
                     </div>
+                  )}
+                  {view === "conversations" && (
+                    <CustomerConversationsPanel
+                      key={workspaceId}
+                      workspace={snapshot.workspace}
+                    />
+                  )}
+                  {view === "approvals" && (
+                    <ApprovalsPanel
+                      key={workspaceId}
+                      workspace={snapshot.workspace}
+                    />
                   )}
                   {view === "orders" && admin && (
                     <section className="r-panel">

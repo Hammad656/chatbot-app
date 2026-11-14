@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { request, acceptSession } from "./api";
 import type { User, Workspace, AuthSession } from "./types";
+import { CustomerPortalSettings } from "./customer-panels";
 
 function workspaceRequest<T>(
   workspaceId: string,
@@ -35,9 +36,12 @@ type Settings = {
   ai_mode: string;
   embedding_model: string;
   allowed_origins: string[];
+  widget_public_key: string | null;
   settings: {
     tone: "professional" | "friendly" | "concise";
     similarity_threshold: number;
+    widget_enabled: boolean;
+    order_provider: "internal" | "external";
   };
 };
 
@@ -357,6 +361,10 @@ export function SettingsPanel({
             method: "PATCH",
             body: JSON.stringify({
               name: form.get("name"),
+              allowed_origins: String(form.get("allowed_origins") ?? "")
+                .split(/\r?\n/)
+                .map((value) => value.trim())
+                .filter(Boolean),
               settings: {
                 ...data.settings,
                 tone: form.get("tone") ?? data.settings.tone,
@@ -364,6 +372,8 @@ export function SettingsPanel({
                   form.get("similarity_threshold") ??
                     data.settings.similarity_threshold,
                 ),
+                widget_enabled: form.get("widget_enabled") === "on",
+                order_provider: form.get("order_provider"),
               },
             }),
           },
@@ -459,6 +469,50 @@ export function SettingsPanel({
             the question and your company documents. If there is no supporting
             passage, the assistant asks for more information.
           </p>
+          <label className="r-checkbox-label">
+            <input
+              type="checkbox"
+              name="widget_enabled"
+              defaultChecked={data.settings.widget_enabled}
+              disabled={!admin}
+            />
+            Enable customer chat for this company
+          </label>
+          <label>
+            Allowed website origins
+            <textarea
+              name="allowed_origins"
+              rows={3}
+              defaultValue={data.allowed_origins.join("\n")}
+              disabled={!admin}
+              placeholder={
+                "https://your-company.com\nhttps://shop.your-company.com"
+              }
+            />
+            <small>
+              One exact origin per line. Your own dashboard origin is always
+              supported. Other sites can embed the widget only after being added
+              here.
+            </small>
+          </label>
+          <label>
+            Order data source
+            <select
+              name="order_provider"
+              defaultValue={data.settings.order_provider}
+              disabled={!admin}
+            >
+              <option value="internal">
+                Built-in authorized order service
+              </option>
+              <option value="external">Configured external order API</option>
+            </select>
+            <small>
+              The external option requires ORDER_API_BASE_URL and
+              ORDER_API_TOKEN on the server. Credentials never enter the
+              browser.
+            </small>
+          </label>
           {admin && (
             <button className="r-button r-primary" disabled={busy}>
               {busy ? "Saving…" : "Save settings"}
@@ -470,6 +524,14 @@ export function SettingsPanel({
         </form>
       ) : (
         <p>Loading settings…</p>
+      )}
+      {data && admin && (
+        <CustomerPortalSettings
+          key={workspace.id}
+          workspaceId={workspace.id}
+          widgetKey={data.widget_public_key}
+          enabled={data.settings.widget_enabled}
+        />
       )}
       {data && workspace.role === "owner" && (
         <section className="r-danger-zone">

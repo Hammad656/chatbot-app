@@ -135,17 +135,22 @@ read-only order tool retains Pydantic validation. Its workspace and customer
 scope come from server records; the model cannot supply a URL, SQL or tenant ID.
 One run has a 30-second preparation budget, and job retries are bounded.
 
-Nothing in preparation mutates an order or delivers a reply. An administrator
-reviews financial/replacement proposals. Approval locks the ticket and order,
-re-checks current policy and eligibility, checks the revision, and executes the
-mock database action atomically with its decision/message/audit record.
-Repeating the same request replays its decision; another ticket cannot refund
-an already resolved order. A rejection records the decision without mutation.
+Nothing in preparation mutates an order or delivers an unreviewed order reply.
+An owner/admin reviews financial/replacement proposals; agents may review low-risk
+replies and handoffs. Approval saves a decision and queues a durable action.
+The worker rechecks the approver's live permissions, current policy/order
+eligibility and ticket revision, then commits the outcome, customer reply and
+audit event atomically. A unique delivery identity prevents duplicate replies;
+a second approved proposal cannot refund an already-refunded sample order.
 
-The current order service and reply inbox are simulations. Approval changes a
-local order record; it does not call a payment processor, carrier, or email API.
-The design's separate action-execution/delivery jobs are required before adding
-real external effects; the current mock transaction is intentionally retained.
+Reviewed replies now reach the actual customer portal conversation. The built-in
+financial order changes are simulations and do not call a payment processor or
+carrier. An optional external order-status HTTP adapter is available with your
+own provider's compatible URL and server-only credentials. Email/SMS delivery is
+not used; customers read their replies in the portal. See the
+[customer workflow guide](CUSTOMER_WORKFLOW.md) for setup, identity, SSE,
+automatic ticket creation, embedding and the external API contract.
+
 Rich policy conditions such as delivery dates, photos and partial restocking
 calculations still require human inspection; mock eligibility flags do not
 prove every condition in an uploaded commercial policy.

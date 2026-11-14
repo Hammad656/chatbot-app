@@ -17,7 +17,7 @@ The test guide contains 60 exercises, instructions for Local demo and Gemini mod
 
 The PDF and DOCX files are generated from the Markdown source. The pack fits the app's 20 MB upload, 80-page PDF, and 500,000-character extracted-text limits. Uploading a policy does not create live orders, send messages, process payments, or implement all of that policy as business logic.
 
-The knowledge PDF has 25 pages and approximately 11,000 words. The separate test-guide PDF has 12 pages. The company corpus is accepted by the application parser; the unified dashboard browser check uploads its actual PDF, waits for the Redis worker, and verifies cited answers and conversation history. The 60 exercises are a manual learning pack, not a claimed live-model quality benchmark.
+The knowledge PDF has 25 pages and approximately 11,000 words. The separate test-guide PDF has 13 pages. The company corpus is accepted by the application parser; the unified dashboard browser check uploads its actual PDF, waits for the Redis worker, and verifies cited answers and conversation history. The 60 exercises are a manual learning pack, not a claimed live-model quality benchmark.
 
 With `dev` checked out locally, get the pack using:
 

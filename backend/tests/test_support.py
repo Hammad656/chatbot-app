@@ -154,9 +154,11 @@ async def test_human_gate_and_order_tool(support_context):
     )
     assert response.status_code == 200, response.text
     assert response.json()["decision"]["result"]["mock"] is True
-    assert response.json()["ticket"]["status"] == "executed"
+    assert response.json()["ticket"]["status"] == "delivery_pending"
+    await execute_approved(support_context)
+    response = await client.get(path)
     assert (
-        response.json()["ticket"]["messages"][-1]["content"]
+        response.json()["messages"][-1]["content"]
         == "An agent has reviewed this request."
     )
 
@@ -176,6 +178,8 @@ async def test_concurrent_idempotency(support_context):
     assert (
         await client.post(path + "/review", json={**body, "reply": "Changed payload"})
     ).status_code == 409
+    await execute_approved(support_context)
+    await execute_approved(support_context)
     async with support_context.factory() as db:
         assert await db.scalar(select(func.count()).select_from(SupportDecision)) == 1
         assert (
@@ -463,9 +467,47 @@ async def test_two_tickets_cannot_refund_same_order_twice(support_context):
         client.post(path + "/review", json=review_body(ticket)),
         client.post(other_path + "/review", json=review_body(draft.json())),
     )
-    assert sorted(r.status_code for r in results) == [200, 409]
+    assert sorted(r.status_code for r in results) == [200, 200]
+    await execute_approved(support_context)
     async with support_context.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(SupportDecision)) == 1
+        from database.models import ActionRequest
+
+        assert await db.scalar(select(func.count()).select_from(SupportDecision)) == 2
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(ActionRequest)
+                .where(ActionRequest.status == "succeeded")
+            )
+            == 1
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(ActionRequest)
+                .where(ActionRequest.status == "failed")
+            )
+            == 1
+        )
+
+
+async def execute_approved(context):
+    from database.models import ActionRequest
+    from resolveai.actions import process_action_once
+
+    async with context.factory() as db:
+        queued = [
+            (row.workspace_id, row.id)
+            for row in (
+                await db.scalars(
+                    select(ActionRequest).where(ActionRequest.status == "approved")
+                )
+            ).all()
+        ]
+    for workspace_id, action_id in queued:
+        await process_action_once(
+            workspace_id=workspace_id, action_id=action_id, factory=context.factory
+        )
 
 
 async def test_worker_reclaims_interrupted_document(support_context):

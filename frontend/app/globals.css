@@ -2,11 +2,11 @@
 
 :root {
   color-scheme: dark;
-  --background: #0d0c13;
+  --background: #080f20;
   --foreground: #f2eef9;
   --muted: #ada5bd;
   --line: rgb(221 206 255 / 11%);
-  --accent: #c5a8ff;
+  --accent: #9eece5;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @theme inline {
@@ -25,8 +25,9 @@ body {
 }
 body {
   background:
-    radial-gradient(ellipse at 9% 2%, #392245, transparent 44%),
-    radial-gradient(ellipse at 100% 100%, #2a2851, transparent 46%), #0d0c13;
+    radial-gradient(ellipse at 8% 3%, #193d55, transparent 46%),
+    radial-gradient(ellipse at 93% 12%, #3b285c77, transparent 42%),
+    radial-gradient(ellipse at 85% 95%, #18444977, transparent 46%), #080f20;
   color: var(--foreground);
   font-family: "Segoe UI", Arial, Helvetica, sans-serif;
   font-size: 14px;

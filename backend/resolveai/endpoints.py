@@ -31,7 +31,7 @@ def build_scoped_router(existing):
             workspace_id=require_workspace(principal),
             user=principal.user,
             db=db,
-            **arguments
+            **arguments,
         )
 
     @router.get("/documents")

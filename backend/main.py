@@ -27,6 +27,8 @@ from auth.router import router as auth_router
 from auth.security import require_csrf, session_secret
 from auth.dependencies import get_current_user
 from workspaces.router import router as workspace_router
+from customers.router import router as customer_router
+from customers.staff import router as customer_staff_router
 from fastapi.responses import RedirectResponse
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -62,6 +64,8 @@ app = FastAPI(
     docs_url="/api/v1/docs",
     openapi_url="/api/v1/openapi.json",
 )
+app.include_router(customer_router)
+app.include_router(customer_staff_router)
 
 
 @app.middleware("http")
@@ -216,6 +220,8 @@ async def readiness():
                 503,
                 "Run alembic upgrade head for authentication and workspace security.",
             )
+        if not await db.scalar(text("SELECT to_regclass('customer_sessions') IS NOT NULL AND to_regclass('support_actions') IS NOT NULL AND to_regprocedure('resolveai_close_customer_session(uuid)') IS NOT NULL")):
+            raise HTTPException(503, "Run alembic upgrade head for customer conversations and approved delivery.")
     if os.getenv("REDIS_URL"):
         from arq import create_pool
         from arq.connections import RedisSettings

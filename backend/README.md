@@ -74,6 +74,21 @@ The API role cannot update/delete audit rows. Account-security events are a
 separate private global log and have no public list API. Workspace deletion
 requires the owner's current role and exact workspace-name confirmation.
 
+## Customer workflow and approved delivery
+
+`customers/` adds one-hour conversation-bound customer sessions, staff-issued
+private access links, SSE answers, feedback and governed escalation tickets.
+`database/security_v3.py` protects customer rows independently of staff membership;
+customers cannot read unapproved drafts, actions or other conversations.
+
+`resolveai/actions.py` stores draft versions and action requests, queues approved
+work and delivers the reviewed reply into the customer conversation exactly once.
+The worker rechecks the approver, evidence, revision and sample-order eligibility.
+`resolveai/orders.py` selects the built-in order service or a configured external
+read-only HTTP provider. A URL/token is required for a live external integration;
+server credentials are never returned to the browser. Sample financial actions
+remain simulated. See [the workflow guide](../docs/CUSTOMER_WORKFLOW.md).
+
 ## AI diagnostics
 
 From the project root:

@@ -49,7 +49,7 @@ async def provision():
                 await connection.exec_driver_sql(
                     f"GRANT USAGE ON SCHEMA public TO {role}"
                 )
-            from database.security_v2 import TENANT_TABLES
+            from database.security_v3 import TENANT_TABLES
 
             for table in (*TENANT_TABLES, "support_members"):
                 permissions = (
@@ -76,6 +76,9 @@ async def provision():
                 "GRANT SELECT ON support_workspaces TO resolveai_worker"
             )
             await connection.exec_driver_sql(
+                "GRANT SELECT (id, is_active) ON users TO resolveai_worker"
+            )
+            await connection.exec_driver_sql(
                 "REVOKE ALL ON FUNCTION public.resolveai_member(uuid, uuid) FROM PUBLIC"
             )
             await connection.exec_driver_sql(
@@ -93,6 +96,16 @@ async def provision():
             await connection.exec_driver_sql(
                 "GRANT EXECUTE ON FUNCTION public.resolveai_purge_expired_tokens() TO resolveai_worker"
             )
+            for signature in (
+                "resolveai_close_customer_session(uuid)",
+                "resolveai_customer_session(uuid,uuid,uuid)",
+                "resolveai_customer_contact(uuid)",
+                "resolveai_widget_config(text)",
+                "resolveai_open_customer_session(text,text,text,text,text)",
+            ):
+                await connection.exec_driver_sql(
+                    f"GRANT EXECUTE ON FUNCTION public.{signature} TO resolveai_app,resolveai_worker"
+                )
         print(
             "ResolveAI runtime roles are ready; API and worker do not own business tables."
         )

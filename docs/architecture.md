@@ -46,7 +46,7 @@ records remain archived without an API or runtime-role table grants.
 | Company knowledge                  | PDF/DOCX/TXT/MD, private files, duplicate hashes, queued ingestion, fixed 768-dimensional Gemini embeddings, pgvector HNSW cosine search                        |
 | Bounded retrieval and answers      | Eight candidates, similarity threshold, at most five sources, strict citations, refusal when evidence is missing                                                |
 | Company conversations              | Saved threads and bounded follow-up context; IDs and history scoped to the active workspace                                                                     |
-| Preparation and review             | Queued classification/retrieval/read-only order lookup/draft; human approval, admin gate for financial actions and atomic idempotent mock outcomes              |
+| Preparation and review             | Queued classification/retrieval/order lookup; versioned drafts, approval outbox, live role recheck, idempotent sample actions and real portal reply delivery              |
 | AI boundary                        | Shared provider seam, versioned prompts, strict Pydantic output, supported Gemini schema, one repair attempt and credential-pattern output guard                |
 | APIs                               | `/api/v1` auth/workspace/member/document/search/conversation/ticket/order/analytics/audit APIs; common errors/request IDs; same-origin Swagger at `/docs`       |
 | Pagination                         | Workspace-bound cursors for canonical document/ticket/conversation/order/audit lists; compatibility dashboard remains bounded                                   |
@@ -63,17 +63,17 @@ workspace membership or Local demo mode. Gemini mode uses provider quota.
 
 ## Validation
 
-The backend suite passes **57 tests and 13 subtests** against real PostgreSQL
+The backend suite passes **65 tests and 13 subtests** against real PostgreSQL
 with pgvector. A separate actual-runtime check uses `resolveai_app` and
 `resolveai_worker`, confirms RLS readiness, then exercises signup, signed workspace
 access, Redis ingestion, cited company chat, cross-account denials, invitations,
 live roles, owner-only deletion and logout.
 
-Both Playwright browser scenarios pass against the local runtime. The checks are
+Playwright browser scenarios exercise the actual local API and worker, including customer order intake, review and portal delivery. The checks are
 committed in `frontend/e2e/auth-tenancy.spec.ts`. They cover
 visible login/signup, error handling, reload/refresh across tabs, logout,
 workspace/account boundaries, actual company-PDF ingestion, cited/history chat,
-recipient invitations, roles and responsive views. They use Local mode rather
+recipient invitations, roles, visible logout, guest/private customer sessions, approved delivery and responsive views. They use Local mode rather
 than spending provider credits. GitHub Actions runs these on an isolated stack.
 
 Live Gemini access still depends on the user's private key and quota. Provider
@@ -83,13 +83,13 @@ image build was previously blocked by this cloud builder's package-registry DNS;
 the native API/worker/web with actual database/Redis containers provide the local
 runtime evidence. CI now also checks the complete Compose deployment.
 
-## Remaining differences from the broader blueprint
+## Blueprint boundaries and remaining work
 
 | PDF item                                                   | Current boundary / remaining work                                                                                                                                                                                                |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Public widget, customer sessions, contacts and SSE         | The requested authenticated dashboard remains the chat interface; the public customer identity/widget/streaming flow is not exposed                                                                                              |
-| Expanded ticket lifecycle and assignment                   | Existing open/processing/review/executed/rejected workflow remains; complete new/triaged/replied/resolved transitions and assignment UI are separate work                                                                        |
-| Separate reply drafts/action requests and execution outbox | Existing ticket/decision records remain. Drafting is queued; approved actions/replies are atomic local DB simulations. Real external effects require separate approved-action/delivery jobs and provider idempotency             |
+| Public widget and customer flow | Implemented: one-hour conversation-bound sessions, private contact access links, SSE answer events, history/feedback, iframe embedding and exact-origin CSP                                                                                              |
+| Ticket lifecycle naming | Assignment, priority, resolution/reopening, delivery-pending and replied states are implemented. Legacy open/processing/awaiting_approval names remain for compatibility rather than renaming historical records                                                                        |
+| External financial integrations | Versioned reply drafts, action requests and an approval outbox are implemented. Replies reach the customer portal. Sample financial changes remain simulated; real payment/CRM writes need separate provider-specific integrations             |
 | Per-call ledger, dollar pricing and hard daily budgets     | Current runs record model, tokens, prompt version, latency and errors. Embedding/per-call cost records and atomic daily token reservations are not yet implemented; no cost is invented or unsupported budget setting advertised |
 | Cache and uniform generated client                         | Auth/request limits are distributed through Redis; response caching, generated OpenAPI TS client and pagination on every list remain                                                                                             |
 | Production storage and cloud deployment                    | Local Docker/private-volume implementation is present. GCS, Cloud Run/SQL, Memorystore, Secret Manager and staging/production deployment are not automatically published                                                         |
@@ -99,3 +99,11 @@ The original PDF remains the source blueprint. The implementation does not claim
 that every planned service or target above has been delivered. Native mobile,
 real CRM/shop/payment integrations, email ingestion, billing, multilingual and
 voice remain outside the PDF's MVP as specified there.
+
+## Customer workflow update
+
+See [Customer workflow and integration guide](CUSTOMER_WORKFLOW.md) for the complete
+portal setup, trust model, SSE events, approval/delivery lifecycle and optional
+external order API contract. The application remains on one web origin. Customer
+chat is opt-in per company; existing company knowledge is not published automatically.
+A guest cannot obtain order access merely by claiming a customer's email.

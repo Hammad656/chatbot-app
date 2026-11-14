@@ -112,6 +112,10 @@ async def settings_view(db, principal):
 
 async def update_settings(db, principal, body):
     require_admin(principal)
+    if body.settings and body.settings.order_provider == "external":
+        from resolveai.orders import provider_config
+
+        provider_config()
     workspace = await db.scalar(
         select(Workspace)
         .where(Workspace.id == principal.workspace_id)
@@ -278,7 +282,9 @@ async def list_invites(db, principal):
                 else (
                     "accepted"
                     if i.accepted_at
-                    else "expired" if i.expires_at <= now else "pending"
+                    else "expired"
+                    if i.expires_at <= now
+                    else "pending"
                 )
             ),
         }

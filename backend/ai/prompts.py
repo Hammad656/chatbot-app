@@ -6,6 +6,6 @@ from pathlib import Path
 
 @lru_cache(maxsize=8)
 def prompt(name: str) -> str:
-    if name not in {"classify_v1", "answer_v1", "draft_v1"}:
+    if name not in {"classify_v1", "answer_v1", "draft_v1", "route_v1"}:
         raise ValueError("Unknown registered prompt.")
     return (Path(__file__).with_name("prompts") / f"{name}.md").read_text()

@@ -200,6 +200,7 @@ role changes, foreign IDs/cursors and non-owner RLS. Browser tests use separate
 accounts and the actual worker in Local mode, with no model calls.
 
 See [the implementation map](architecture.md) for the complete design audit.
-Public customer widget/SSE, the expanded ticket lifecycle, external-action outbox,
-per-call pricing/hard daily model budgets, full generated client, cloud deployment
-and measured evaluation targets are not claimed as complete in this dashboard pass.
+Customer widget/SSE, private customer access, assignment/resolution and the approved
+action outbox are now implemented; see [Customer workflow](CUSTOMER_WORKFLOW.md).
+Per-call pricing/hard daily model budgets, the full generated client, cloud deployment
+and measured evaluation targets remain broader blueprint work.

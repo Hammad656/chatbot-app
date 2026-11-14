@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import json
 import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -17,6 +16,11 @@ from starlette.concurrency import run_in_threadpool
 from database.models import (
     BusinessChunk,
     BusinessDocument,
+    CustomerConversation,
+    CustomerFeedback,
+    CustomerMessage,
+    CustomerTurn,
+    ActionRequest,
     DemoOrder,
     KnowledgeAnswer,
     KnowledgeThread,
@@ -69,6 +73,8 @@ def ticket_summary(ticket):
         "created_at",
         "updated_at",
         "last_error",
+        "assigned_to",
+        "customer_conversation_id",
     )
 
 
@@ -345,6 +351,45 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                 .group_by(SupportFeedback.vote)
             )
         ).all()
+        customer_counts = dict(
+            (
+                await db.execute(
+                    select(CustomerTurn.status, func.count())
+                    .where(CustomerTurn.workspace_id == workspace_id)
+                    .group_by(CustomerTurn.status)
+                )
+            ).all()
+        )
+        customer_feedback = dict(
+            (
+                await db.execute(
+                    select(CustomerFeedback.vote, func.count())
+                    .where(CustomerFeedback.workspace_id == workspace_id)
+                    .group_by(CustomerFeedback.vote)
+                )
+            ).all()
+        )
+        conversation_count = await db.scalar(
+            select(func.count())
+            .select_from(CustomerConversation)
+            .where(CustomerConversation.workspace_id == workspace_id)
+        )
+        delivered_replies = await db.scalar(
+            select(func.count())
+            .select_from(CustomerMessage)
+            .where(
+                CustomerMessage.workspace_id == workspace_id,
+                CustomerMessage.role == "agent",
+            )
+        )
+        queued_actions = await db.scalar(
+            select(func.count())
+            .select_from(ActionRequest)
+            .where(
+                ActionRequest.workspace_id == workspace_id,
+                ActionRequest.status == "approved",
+            )
+        )
         members = (
             await db.execute(
                 select(User.email, WorkspaceMember.role)
@@ -424,6 +469,12 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                     sum(r.duration_ms for r in runs) / max(1, len(runs))
                 ),
                 "feedback": {str(v): n for v, n in feedback},
+                "customer_conversations": conversation_count,
+                "self_service_answers": customer_counts.get("completed", 0),
+                "human_handoffs": customer_counts.get("awaiting_review", 0),
+                "delivered_replies": delivered_replies,
+                "queued_actions": queued_actions,
+                "customer_feedback": {str(v): n for v, n in customer_feedback.items()},
             },
         }
 
@@ -667,7 +718,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
         ticket = SupportTicket(
             workspace_id=workspace_id,
             created_by=user.id,
-            **body.model_dump(mode="json")
+            **body.model_dump(mode="json"),
         )
         ticket.customer_email = ticket.customer_email.lower()
         db.add(ticket)
@@ -709,8 +760,11 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
     ):
         workspace, _ = await member(db, workspace_id, user.id)
         ticket = await ticket_in_workspace(db, workspace_id, ticket_id, lock=True)
-        if ticket.status == "executed":
-            raise HTTPException(409, "This ticket has already been resolved.")
+        if ticket.status in ("executed", "resolved", "delivery_pending"):
+            raise HTTPException(
+                409,
+                "This ticket is resolved or awaiting delivery. Reopen resolved tickets before preparing a new draft.",
+            )
         if ticket.status == "processing":
             active = await db.scalar(
                 select(SupportRun)
@@ -731,6 +785,16 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                     "Previous worker interrupted; restarted by a user.",
                 )
         run = await reserve_run(db, workspace, ticket.id)
+        for action in (
+            await db.scalars(
+                select(ActionRequest).where(
+                    ActionRequest.workspace_id == workspace_id,
+                    ActionRequest.ticket_id == ticket.id,
+                    ActionRequest.status == "proposed",
+                )
+            )
+        ).all():
+            action.status = "superseded"
         ticket.status, ticket.last_error = "processing", None
         ticket.revision += 1
         revision = ticket.revision
@@ -768,157 +832,9 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
     ):
         _, role = await member(db, workspace_id, user.id)
         ticket = await ticket_in_workspace(db, workspace_id, ticket_id, lock=True)
-        if ticket.proposed_action.get("kind") in (
-            "refund",
-            "replacement",
-        ) and role not in ("owner", "admin"):
-            raise HTTPException(
-                403, "An administrator must review this sensitive action."
-            )
-        digest = hashlib.sha256(
-            json.dumps(
-                body.model_dump(mode="json", exclude={"request_id"}), sort_keys=True
-            ).encode()
-        ).hexdigest()
-        previous = await db.scalar(
-            select(SupportDecision).where(
-                SupportDecision.workspace_id == workspace_id,
-                SupportDecision.request_id == body.request_id,
-            )
-        )
-        if previous is None:
-            previous = await db.scalar(
-                select(SupportDecision).where(
-                    SupportDecision.workspace_id == workspace_id,
-                    SupportDecision.ticket_id == ticket_id,
-                    SupportDecision.ticket_revision == body.expected_revision,
-                )
-            )
-        if previous:
-            if previous.ticket_id != ticket_id or previous.request_hash != digest:
-                raise HTTPException(
-                    409,
-                    "This review/idempotency key was already used with different parameters.",
-                )
-            return {
-                "replayed": True,
-                "decision": fields(previous, "id", "decision", "action", "result"),
-                "ticket": await detail(db, ticket),
-            }
-        if (
-            ticket.status != "awaiting_approval"
-            or ticket.revision != body.expected_revision
-        ):
-            raise HTTPException(
-                409, "The ticket changed. Reload it and review the latest draft."
-            )
-        kind = ticket.proposed_action.get("kind", "escalate")
-        outcome = {"mock": True, "delivery": "not_sent", "action": kind}
-        if body.decision == "approve":
-            ids = [UUID(source["document_id"]) for source in ticket.sources]
-            ready = (
-                await db.scalars(
-                    select(BusinessDocument.id)
-                    .where(
-                        BusinessDocument.id.in_(ids),
-                        BusinessDocument.workspace_id == workspace_id,
-                        BusinessDocument.status == "ready",
-                    )
-                    .order_by(BusinessDocument.id)
-                    .with_for_update()
-                )
-            ).all()
-            if set(ids) != set(ready) or (
-                kind in ("refund", "replacement") and not ids
-            ):
-                raise HTTPException(
-                    409,
-                    "Policy evidence changed or was removed. Generate a new draft before approval.",
-                )
-            if kind in ("refund", "replacement"):
-                order = await db.scalar(
-                    select(DemoOrder)
-                    .where(
-                        DemoOrder.workspace_id == workspace_id,
-                        DemoOrder.id == UUID(ticket.proposed_action["order_id"]),
-                        DemoOrder.customer_email == ticket.customer_email,
-                    )
-                    .with_for_update()
-                )
-                allowed = (
-                    order
-                    and order.status in ("delivered", "shipped")
-                    and (order.refundable if kind == "refund" else order.replaceable)
-                )
-                if (
-                    not allowed
-                    or order.amount_cents != ticket.proposed_action["amount_cents"]
-                ):
-                    raise HTTPException(
-                        409,
-                        "The order is no longer eligible. Generate a new draft or escalate.",
-                    )
-                order.status = (
-                    "refunded" if kind == "refund" else "replacement_requested"
-                )
-                order.refundable = order.replaceable = False
-                outcome.update(
-                    {
-                        "order_reference": order.reference,
-                        "order_status": order.status,
-                        "amount_cents": order.amount_cents,
-                        "currency": order.currency,
-                    }
-                )
-            ticket.status = "escalated" if kind == "escalate" else "executed"
-            outcome["delivery"] = "recorded_in_demo_inbox"
-            db.add(
-                SupportMessage(
-                    workspace_id=workspace_id,
-                    ticket_id=ticket_id,
-                    role="agent",
-                    content=body.reply,
-                    actor_id=user.id,
-                )
-            )
-        else:
-            ticket.status = "rejected"
-        decision = SupportDecision(
-            workspace_id=workspace_id,
-            ticket_id=ticket_id,
-            ticket_revision=ticket.revision,
-            request_id=body.request_id,
-            request_hash=digest,
-            decision=body.decision,
-            action=kind,
-            reply=body.reply,
-            result=outcome,
-            actor_id=user.id,
-        )
-        db.add(decision)
-        ticket.revision += 1
-        audit(
-            db,
-            workspace_id,
-            user.id,
-            "review.approved" if body.decision == "approve" else "review.rejected",
-            ticket_id,
-            action=kind,
-            revision=body.expected_revision,
-        )
-        if body.decision == "approve":
-            audit(
-                db, workspace_id, user.id, "mock_action.executed", ticket_id, **outcome
-            )
-        # Order mutation, decision, simulated reply and audit are one DB transaction.
-        await db.commit()
-        await db.refresh(decision)
-        await db.refresh(ticket)
-        return {
-            "replayed": False,
-            "decision": fields(decision, "id", "decision", "action", "result"),
-            "ticket": await detail(db, ticket),
-        }
+        from resolveai.actions import review
+
+        return await review(db, ticket, body, user, role)
 
     @router.post(
         "/workspaces/{workspace_id}/tickets/{ticket_id}/feedback",
@@ -939,7 +855,7 @@ def build_router(current_user, csrf, generate, configured_model, map_error):
                 workspace_id=workspace_id,
                 ticket_id=ticket_id,
                 user_id=user.id,
-                **body.model_dump()
+                **body.model_dump(),
             )
             .on_conflict_do_update(
                 constraint="support_feedback_user", set_=body.model_dump()

@@ -58,6 +58,22 @@ are revoked, and existing workspace creators are promoted to owner.
 See the [authentication and tenancy learning guide](docs/AUTH_AND_TENANCY.md)
 for files, endpoint examples, browser behavior and troubleshooting.
 
+## Customer chat and approved replies
+
+Enable **Customer chat** in workspace Settings, open the support link, and ask
+company-policy questions. For order questions, an owner/admin issues a private
+customer access link matching the email on the order. Email alone is not proof
+of identity. Guest and signed-in customer states are visibly distinguished.
+
+Staff use **Conversations** and **Approvals** to inspect intake, tool results and
+drafts. Approval queues a worker action; reviewed replies then reach the customer's
+actual portal conversation. Sample refunds/replacements remain explicitly simulated.
+The optional external order adapter requires your authorized provider's server URL,
+token and compatible API contract; it is not connected to a third-party account by default.
+
+See the [customer workflow learning guide](docs/CUSTOMER_WORKFLOW.md), including
+how to test **ORD-1001**, embedding instructions and the API contract.
+
 ## Pinecone and embeddings
 
 The supplied system design chooses **PostgreSQL + pgvector**, so this version
@@ -90,8 +106,9 @@ docker compose --env-file backend/.env exec api python check_gemini.py --structu
 - [Original supplied system design](docs/design/ResolveAI_System_Design.pdf)
 - [Uploadable fictional company documents and test guide](docs/demo/README.md)
 
-The broader design still includes a public customer widget,
-streaming, detailed model-cost accounting and production cloud integrations.
+The customer portal, embeddable widget, SSE responses, automatic handoff tickets
+and approved portal delivery are now implemented. Detailed model-cost accounting
+and production cloud integrations remain broader design work.
 The implementation map distinguishes those items from the company-dashboard
 workflow delivered here; this repository does not claim a complete production
 rollout or the design's unmeasured latency/evaluation targets.

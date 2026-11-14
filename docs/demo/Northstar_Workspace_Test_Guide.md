@@ -252,7 +252,7 @@ F01. Shipping lookup: open the Where is my order? ticket for alex@example.com an
 
 F02. Damaged-product replacement: open My item arrived damaged for maya@example.com and ORD-1002. Prepare a draft and inspect the policy evidence and proposed replacement. Expected: the order remains delivered while awaiting approval. The reviewer must manually check the fuller fictional policy's evidence requirements before approving. For a synthetic exercise, make those review assumptions explicit in the test notes.
 
-F03. Human gate and execution: approve F02 as a workspace owner or admin. Expected: one mock replacement action; order becomes replacement_requested; its refundable/replaceable flags become false; the approved reply and review outcome are recorded. No actual lamp is shipped, and no external email is sent.
+F03. Human gate and execution: approve F02 as a workspace owner or admin. Approval queues the action; wait for the worker to complete it. Expected: one mock replacement action; order becomes replacement_requested; its refundable/replaceable flags become false; the approved reply and review outcome are recorded. No actual lamp is shipped, and no external email is sent.
 
 F04. Refund flow: open Request a refund for nora@example.com and ORD-1003 and prepare a draft. The order remains delivered until approval. Expected proposal: full USD 49 mock order refund based on the fixture flags and matching policy evidence. The existing demo does not calculate restocking deductions, invoice taxes, or partial line-item refunds. Use the synthetic fixture as a no-deduction review case, rather than treating it as a test of commercial amount calculation.
 
@@ -263,6 +263,8 @@ F06. Customer mismatch: create a new ticket using ORD-1001 but another synthetic
 F07. Missing order and safe escalation: create a refund ticket referencing ORD-9999, which you have not created in the workspace. Expected: lookup_order returns not found; the mock workflow proposes escalation rather than a refund. A catalog price or refund paragraph cannot substitute for an actual matching order.
 
 F08. Roles and duplicate protection: register a second synthetic account, create an invitation from Workspace team, and accept it using that invited email. An agent can prepare drafts and approve low-risk replies/escalations, but cannot approve refunds or replacements, manage members, or change workspace settings. After an admin approves an eligible order resolution, a new ticket for the same resolved order must not obtain another eligible financial action. For an exact same-request retry, inspect the API/test implementation's idempotency behavior rather than deliberately generating new financial requests.
+
+For the public customer portal, private access links and actual reviewed reply delivery, follow docs/CUSTOMER_WORKFLOW.md. These eight exercises use seeded staff-inbox tickets.
 
 The eight exercises cover preparation, a read-only tool, evidence, human review, mock mutation, rejection, customer scoping, absent records, roles, and duplicate protection. Resetting a draft does not reset an order. If you need to repeat an approval scenario, use a fresh workspace or create a new synthetic eligible order through the authorized UI.
 

@@ -46,6 +46,8 @@ export type Ticket = {
   created_at: string;
   updated_at: string;
   last_error: string | null;
+  assigned_to: string | null;
+  customer_conversation_id: string | null;
 };
 export type Run = {
   id: string;
@@ -130,5 +132,11 @@ export type Snapshot = {
     recent_tokens: number;
     average_duration_ms: number;
     feedback: Record<string, number>;
+    customer_conversations: number;
+    self_service_answers: number;
+    human_handoffs: number;
+    delivered_replies: number;
+    queued_actions: number;
+    customer_feedback: Record<string, number>;
   };
 };

@@ -366,7 +366,7 @@ class SupportTicket(Base):
     __tablename__ = "support_tickets"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('open', 'processing', 'awaiting_approval', 'executed', 'rejected', 'escalated')",
+            "status IN ('open', 'processing', 'awaiting_approval', 'delivery_pending', 'executed', 'rejected', 'escalated', 'replied', 'resolved')",
             name="support_ticket_status",
         ),
         CheckConstraint(
@@ -393,6 +393,14 @@ class SupportTicket(Base):
     tool_calls: Mapped[list] = mapped_column(JSON, default=list)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    customer_conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -560,4 +568,260 @@ class KnowledgeAnswer(Base):
     mode: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CustomerContact(Base):
+    __tablename__ = "customer_contacts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "email", name="customer_contact_email"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    name: Mapped[str] = mapped_column(String(100), default="Guest")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CustomerAccessLink(Base):
+    __tablename__ = "customer_access_links"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_contacts.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CustomerConversation(Base):
+    __tablename__ = "customer_conversations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','waiting_for_agent','resolved')",
+            name="customer_conversation_status",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_contacts.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(100), default="Customer conversation")
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CustomerSession(Base):
+    __tablename__ = "customer_sessions"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_contacts.id", ondelete="CASCADE")
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_conversations.id", ondelete="CASCADE"), index=True
+    )
+    access_link_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer_access_links.id", ondelete="CASCADE"), nullable=True
+    )
+    cookie_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    site_origin: Mapped[str] = mapped_column(String(500))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CustomerTurn(Base):
+    __tablename__ = "customer_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "request_id", name="customer_turn_idempotency"
+        ),
+        CheckConstraint(
+            "status IN ('queued','running','completed','awaiting_review','failed')",
+            name="customer_turn_status",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_conversations.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_sessions.id", ondelete="CASCADE")
+    )
+    request_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    content: Mapped[str] = mapped_column(String(4000))
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    ticket_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("support_tickets.id", ondelete="SET NULL"), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(default=0)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CustomerMessage(Base):
+    __tablename__ = "customer_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('customer','assistant','agent','system')",
+            name="customer_message_role",
+        ),
+        UniqueConstraint("turn_id", "role", name="customer_turn_message"),
+        UniqueConstraint("delivery_id", name="customer_delivery_once"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_conversations.id", ondelete="CASCADE"), index=True
+    )
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer_turns.id", ondelete="SET NULL"), nullable=True
+    )
+    delivery_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class CustomerFeedback(Base):
+    __tablename__ = "customer_feedback"
+    __table_args__ = (
+        UniqueConstraint("message_id", "contact_id", name="customer_feedback_once"),
+        CheckConstraint("vote IN (-1,1)", name="customer_feedback_vote"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_conversations.id", ondelete="CASCADE")
+    )
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_contacts.id", ondelete="CASCADE")
+    )
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customer_messages.id", ondelete="CASCADE")
+    )
+    vote: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ReplyDraft(Base):
+    __tablename__ = "support_reply_drafts"
+    __table_args__ = (
+        UniqueConstraint("ticket_id", "revision", name="support_draft_revision"),
+        CheckConstraint(
+            "status IN ('proposed','approved','rejected','superseded')",
+            name="support_draft_status",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_tickets.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column()
+    content: Mapped[str] = mapped_column(Text)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="proposed")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class ActionRequest(Base):
+    __tablename__ = "support_actions"
+    __table_args__ = (
+        UniqueConstraint("ticket_id", "revision", name="support_action_revision"),
+        UniqueConstraint("decision_id", name="support_action_decision"),
+        CheckConstraint(
+            "status IN ('proposed','approved','running','succeeded','failed','rejected','superseded')",
+            name="support_action_status",
+        ),
+        CheckConstraint(
+            "kind IN ('reply','escalate','refund','replacement')",
+            name="support_action_kind",
+        ),
+        CheckConstraint("risk IN ('write','sensitive')", name="support_action_risk"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("support_tickets.id", ondelete="CASCADE"), index=True
+    )
+    draft_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("support_reply_drafts.id", ondelete="SET NULL"), nullable=True
+    )
+    decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("support_decisions.id", ondelete="SET NULL"), nullable=True
+    )
+    revision: Mapped[int] = mapped_column()
+    kind: Mapped[str] = mapped_column(String(32))
+    risk: Mapped[str] = mapped_column(String(16))
+    arguments: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(
+        Uuid, default=uuid.uuid4, unique=True
+    )
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(default=0)
+    reply: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

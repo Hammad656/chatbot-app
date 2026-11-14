@@ -10,7 +10,13 @@ from arq import Retry, create_pool, cron
 from arq.connections import RedisSettings
 from sqlalchemy import DateTime, and_, cast, func, or_, select, text
 
-from database.models import BusinessDocument, SupportRun, Workspace
+from database.models import (
+    ActionRequest,
+    CustomerTurn,
+    BusinessDocument,
+    SupportRun,
+    Workspace,
+)
 from database.session import async_session_factory
 from database.tenant import set_tenant
 from resolveai.worker import process_once
@@ -91,6 +97,58 @@ async def prepare_ticket(ctx, workspace_id, run_id):
             )
 
 
+async def enqueue_operation(name, workspace_id, record_id):
+    if not os.getenv("REDIS_URL"):
+        return False
+    pool = None
+    try:
+        settings = RedisSettings.from_dsn(os.environ["REDIS_URL"])
+        settings.conn_retries, settings.conn_timeout = 0, 1
+        pool = await create_pool(settings)
+        await pool.enqueue_job(
+            name, str(workspace_id), str(record_id), _job_id=f"{name}:{record_id}"
+        )
+        return True
+    except Exception as error:
+        logger.warning(
+            "Redis operation dispatch unavailable (%s); durable work remains queued.",
+            type(error).__name__,
+        )
+        return False
+    finally:
+        if pool:
+            await pool.aclose()
+
+
+async def enqueue_customer_turn(workspace_id, turn_id):
+    return await enqueue_operation("process_customer_turn", workspace_id, turn_id)
+
+
+async def enqueue_action(workspace_id, action_id):
+    return await enqueue_operation("execute_action", workspace_id, action_id)
+
+
+async def process_customer_turn(ctx, workspace_id, turn_id):
+    from customers.worker import process_customer_turn_once
+
+    await process_customer_turn_once(
+        workspace_id=UUID(workspace_id), turn_id=UUID(turn_id)
+    )
+    async with async_session_factory() as db:
+        await set_tenant(db, UUID(workspace_id))
+        turn = await db.get(CustomerTurn, UUID(turn_id))
+        if turn and turn.status == "queued":
+            raise Retry(defer=2**turn.attempts + random.random())
+
+
+async def execute_action(ctx, workspace_id, action_id):
+    from resolveai.actions import process_action_once
+
+    await process_action_once(
+        workspace_id=UUID(workspace_id), action_id=UUID(action_id)
+    )
+
+
 async def dispatch_pending(ctx):
     async with async_session_factory() as db:
         workspaces = list((await db.scalars(select(Workspace.id))).all())
@@ -152,6 +210,45 @@ async def dispatch_pending(ctx):
                     str(run.id),
                     _job_id=f"draft:{run.id}",
                 )
+            turns = (
+                await db.scalars(
+                    select(CustomerTurn).where(
+                        CustomerTurn.workspace_id == workspace_id,
+                        or_(
+                            CustomerTurn.status == "queued",
+                            and_(
+                                CustomerTurn.status == "running",
+                                CustomerTurn.updated_at
+                                < datetime.now(timezone.utc) - timedelta(minutes=2),
+                            ),
+                        ),
+                    )
+                )
+            ).all()
+            for turn in turns:
+                if turn.status == "running":
+                    turn.status = "queued"
+                await ctx["redis"].enqueue_job(
+                    "process_customer_turn",
+                    str(workspace_id),
+                    str(turn.id),
+                    _job_id=f"process_customer_turn:{turn.id}",
+                )
+            actions = (
+                await db.scalars(
+                    select(ActionRequest.id).where(
+                        ActionRequest.workspace_id == workspace_id,
+                        ActionRequest.status == "approved",
+                    )
+                )
+            ).all()
+            for action_id in actions:
+                await ctx["redis"].enqueue_job(
+                    "execute_action",
+                    str(workspace_id),
+                    str(action_id),
+                    _job_id=f"execute_action:{action_id}",
+                )
             await db.commit()
 
 
@@ -162,7 +259,7 @@ async def purge_expired_tokens(ctx):
 
 
 class WorkerSettings:
-    functions = [ingest_document, prepare_ticket]
+    functions = [ingest_document, prepare_ticket, process_customer_turn, execute_action]
     cron_jobs = [
         cron(dispatch_pending, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
         cron(purge_expired_tokens, hour=3, minute=15, second=0),
